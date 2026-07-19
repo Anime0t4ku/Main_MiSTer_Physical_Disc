@@ -2544,6 +2544,12 @@ void HandleUI(void)
 									menustate = MENU_NONE1;
 									break;
 								}
+								if (is_megacd() && bit == 93)
+								{
+									mcd_use_physical_cd();
+									menustate = MENU_NONE1;
+									break;
+								}
 								const char *opt = p + 1;
 								if (!bit && (is_x86() || is_pcxt()))
 								{

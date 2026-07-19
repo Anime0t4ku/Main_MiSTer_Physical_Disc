@@ -277,7 +277,7 @@ char is_minimig()
 static int is_megacd_type = 0;
 char is_megacd()
 {
-	if (!is_megacd_type) is_megacd_type = strcasecmp(orig_name, "MEGACD") ? 2 : 1;
+	if (!is_megacd_type) is_megacd_type = (strcasecmp(orig_name, "MEGACD") && strcasecmp(orig_name, "CD-MEGACD")) ? 2 : 1;
 	return (is_megacd_type == 1);
 }
 

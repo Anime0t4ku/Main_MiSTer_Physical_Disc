@@ -54,6 +54,9 @@ public:
 
 	cdd_t();
 	int Load(const char *filename);
+	int LoadPhysical();
+	int IsPhysical() const;
+	static int PhysicalDiscPresent();
 	void Unload();
 	void Reset();
 	void Update();
@@ -72,6 +75,7 @@ private:
 	int chd_hunknum;
 	uint8_t *chd_hunkbuf;
 	int chd_audio_read_lba;
+	int physical;
 	uint8_t stat[10];
 	uint8_t comm[10];
 
@@ -98,6 +102,10 @@ extern cdd_t cdd;
 
 void mcd_poll();
 void mcd_set_image(int num, const char *filename);
+void mcd_use_physical_cd();
+void mcd_physical_stats_reset();
+void mcd_physical_stats_poll();
+void mcd_physical_note_fpga_wait(uint8_t type);
 void mcd_reset();
 int mcd_send_data(uint8_t* buf, int len, uint8_t index);
 int mcd_can_send_data(uint8_t type);

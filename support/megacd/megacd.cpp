@@ -19,12 +19,36 @@
 
 static int need_reset=0;
 static uint8_t has_command = 0;
+static int mcd_physical_enabled = 0;
+static int mcd_physical_present = 0;
+static uint32_t mcd_physical_poll_timer = 0;
 
 void mcd_poll()
 {
 	static uint32_t poll_timer = 0;
 	static uint8_t last_req = 255;
 	static uint8_t adj = 0;
+
+	if (mcd_physical_enabled && (!mcd_physical_poll_timer || CheckTimer(mcd_physical_poll_timer))) {
+		mcd_physical_poll_timer = GetTimer(500);
+		int present = cdd_t::PhysicalDiscPresent();
+		if (present != mcd_physical_present) {
+			mcd_physical_present = present;
+			if (present) {
+				printf("MCD-CD: physical disc inserted\n");
+				cdd.LoadPhysical();
+				cdd.status = cdd.loaded ? CD_STAT_STOP : CD_STAT_NO_DISC;
+				cdd.latency = 10;
+				cdd.SendData = mcd_send_data;
+				cdd.CanSendData = mcd_can_send_data;
+			} else {
+				printf("MCD-CD: physical disc removed\n");
+				cdd.Unload();
+				cdd.status = CD_STAT_NO_DISC;
+			}
+		}
+	}
+	if (mcd_physical_enabled) mcd_physical_stats_poll();
 
 	if (!poll_timer || CheckTimer(poll_timer))
 	{
@@ -121,6 +145,7 @@ void mcd_set_image(int num, const char *filename)
 	static char last_dir[1024] = {};
 
 	(void)num;
+	mcd_physical_enabled = 0;
 
 	cdd.Unload();
 	cdd.status = CD_STAT_OPEN;
@@ -179,6 +204,30 @@ void mcd_set_image(int num, const char *filename)
 			cdd.status = CD_STAT_NO_DISC;
 		}
 	}
+}
+
+void mcd_use_physical_cd()
+{
+	printf("MCD-CD: Use Physical Disc selected\n");
+	mcd_physical_enabled = 1;
+	mcd_physical_poll_timer = 0;
+	mcd_physical_present = cdd_t::PhysicalDiscPresent();
+	cdd.Unload();
+
+	sprintf(buf, "%s/boot.rom", HomeDir());
+	if (!user_io_file_tx(buf)) Info("CD BIOS not found!", 4000);
+
+	if (!mcd_physical_present || !cdd.LoadPhysical()) {
+		cdd.status = CD_STAT_NO_DISC;
+		Info("Physical CD mode enabled - insert a disc", 3000);
+		return;
+	}
+	cdd.status = CD_STAT_STOP;
+	cdd.latency = 10;
+	cdd.SendData = mcd_send_data;
+	cdd.CanSendData = mcd_can_send_data;
+	mcd_reset();
+	Info("Physical Mega CD disc mounted", 2000);
 }
 
 void mcd_reset() {
@@ -292,6 +341,7 @@ int mcd_can_send_data(uint8_t type) {
 
 	uint16_t data = spi_w(0);
 	DisableIO();
+	if (data != 1) mcd_physical_note_fpga_wait(type);
 
 	return (data == 1);
 }
