@@ -3,6 +3,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <errno.h>
+#include <climits>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <linux/cdrom.h>
+#include <pthread.h>
+#include <sched.h>
 
 #include "../../file_io.h"
 #include "../../user_io.h"
@@ -19,6 +27,31 @@ static char buf[1024];
 static uint8_t *chd_hunkbuf = NULL;
 static int chd_hunknum;
 static int noreset = 0;
+static int physical_cd_fd = -1;
+static int physical_cd_enabled = 0;
+static int physical_disc_present = 0;
+static uint32_t physical_poll_timer = 0;
+
+#define PHYSICAL_CD_DEVICE "/dev/sr0"
+#define PHYSICAL_CACHE_SLOTS 2
+#define PHYSICAL_CACHE_SECTORS 64
+#define PHYSICAL_PACKET_SECTORS 16
+
+struct physical_cache_slot_t
+{
+	int start_lba;
+	int valid;
+	uint8_t data[PHYSICAL_CACHE_SECTORS * 2352];
+};
+
+static physical_cache_slot_t physical_cache[PHYSICAL_CACHE_SLOTS] = {};
+static pthread_mutex_t physical_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t physical_cache_cond = PTHREAD_COND_INITIALIZER;
+static pthread_t physical_cache_thread;
+static int physical_cache_thread_started = 0;
+static int physical_cache_busy = 0;
+static int physical_cache_request_slot = 0;
+static int physical_cache_request_lba = 0;
 
 static int sgets(char *out, int sz, char **in)
 {
@@ -462,6 +495,316 @@ void psx_fill_blanksave(uint8_t *buffer, uint32_t lba, int cnt)
 static toc_t toc = {};
 #define CD_SECTOR_LEN 2352
 
+static void physical_cd_close()
+{
+	if (physical_cache_thread_started)
+	{
+		pthread_mutex_lock(&physical_cache_mutex);
+		while (physical_cache_busy) pthread_cond_wait(&physical_cache_cond, &physical_cache_mutex);
+		for (int i = 0; i < PHYSICAL_CACHE_SLOTS; i++) physical_cache[i].valid = 0;
+		pthread_mutex_unlock(&physical_cache_mutex);
+	}
+	if (physical_cd_fd >= 0) close(physical_cd_fd);
+	physical_cd_fd = -1;
+	physical_disc_present = 0;
+}
+
+static int physical_cd_open()
+{
+	if (physical_cd_fd >= 0) return 1;
+	physical_cd_fd = open(PHYSICAL_CD_DEVICE, O_RDONLY | O_NONBLOCK);
+	if (physical_cd_fd < 0)
+	{
+		printf("PSX: cannot open %s: %s\n", PHYSICAL_CD_DEVICE, strerror(errno));
+		return 0;
+	}
+	return 1;
+}
+
+static int physical_cd_has_disc()
+{
+	if (!physical_cd_open()) return 0;
+	return ioctl(physical_cd_fd, CDROM_DRIVE_STATUS, CDSL_CURRENT) == CDS_DISC_OK;
+}
+
+static void physical_cd_clear_toc()
+{
+	unload_cue(&toc);
+	unload_chd(&toc);
+	memset(&toc, 0, sizeof(toc));
+}
+
+static int physical_cd_load_toc(toc_t *table)
+{
+	struct cdrom_tochdr header = {};
+	struct cdrom_tocentry entries[100] = {};
+
+	if (!physical_cd_has_disc()) return 0;
+	if (ioctl(physical_cd_fd, CDROMREADTOCHDR, &header) < 0)
+	{
+		printf("PSX: CDROMREADTOCHDR failed: %s\n", strerror(errno));
+		return 0;
+	}
+
+	int count = header.cdth_trk1 - header.cdth_trk0 + 1;
+	if (count < 1 || count > 99) return 0;
+
+	for (int i = 0; i < count; i++)
+	{
+		entries[i].cdte_track = header.cdth_trk0 + i;
+		entries[i].cdte_format = CDROM_LBA;
+		if (ioctl(physical_cd_fd, CDROMREADTOCENTRY, &entries[i]) < 0)
+		{
+			printf("PSX: CDROMREADTOCENTRY track %d failed: %s\n", i + 1, strerror(errno));
+			return 0;
+		}
+	}
+
+	entries[count].cdte_track = CDROM_LEADOUT;
+	entries[count].cdte_format = CDROM_LBA;
+	if (ioctl(physical_cd_fd, CDROMREADTOCENTRY, &entries[count]) < 0)
+	{
+		printf("PSX: CDROMREADTOCENTRY lead-out failed: %s\n", strerror(errno));
+		return 0;
+	}
+
+	physical_cd_clear_toc();
+	for (int i = 0; i < count; i++)
+	{
+		cd_track_t *track = &table->tracks[i];
+		track->start = entries[i].cdte_addr.lba + 150;
+		track->end = entries[i + 1].cdte_addr.lba + 149;
+		track->sector_size = CD_SECTOR_LEN;
+		track->type = (entries[i].cdte_ctrl & CDROM_DATA_TRACK) ? TT_MODE1 : TT_CDDA;
+		track->indexes[1] = 0;
+		printf("PSX: Physical track %d, start=%u, end=%u, type=%s\n",
+			i + 1, track->start, track->end, track->type ? "data" : "audio");
+	}
+
+	table->last = count;
+	table->end = entries[count].cdte_addr.lba + 150;
+	return 1;
+}
+
+static int physical_cd_read_sector(uint8_t *buffer, int lba)
+{
+	if (!physical_disc_present || physical_cd_fd < 0 || lba < 150)
+	{
+		memset(buffer, 0, CD_SECTOR_LEN);
+		return 0;
+	}
+
+	// CDROMREADRAW takes an MSF address and overwrites the same argument with
+	// one complete 2352-byte raw sector. MiSTer LBAs include the standard
+	// 150-frame lead-in, so they already map directly to absolute MSF here.
+	union
+	{
+		struct cdrom_msf msf;
+		uint8_t raw[CD_SECTOR_LEN];
+	} request = {};
+
+	int absolute_frame = lba;
+	request.msf.cdmsf_min0 = absolute_frame / (60 * 75);
+	request.msf.cdmsf_sec0 = (absolute_frame / 75) % 60;
+	request.msf.cdmsf_frame0 = absolute_frame % 75;
+	absolute_frame++;
+	request.msf.cdmsf_min1 = absolute_frame / (60 * 75);
+	request.msf.cdmsf_sec1 = (absolute_frame / 75) % 60;
+	request.msf.cdmsf_frame1 = absolute_frame % 75;
+
+	if (ioctl(physical_cd_fd, CDROMREADRAW, &request) < 0)
+	{
+		printf("PSX: physical CD read failed at LBA %d: %s\n", lba - 150, strerror(errno));
+		memset(buffer, 0, CD_SECTOR_LEN);
+		return 0;
+	}
+	memcpy(buffer, request.raw, CD_SECTOR_LEN);
+	return 1;
+}
+
+static int physical_cd_track_for_lba(int lba)
+{
+	for (int i = 0; i < toc.last; i++)
+	{
+		if (lba >= (int)toc.tracks[i].start && lba <= (int)toc.tracks[i].end) return i;
+	}
+	return -1;
+}
+
+static int physical_cd_read_packet(uint8_t *buffer, int lba, int cnt, int track)
+{
+	if (physical_cd_fd < 0 || cnt < 1 || track < 0) return 0;
+
+	struct cdrom_generic_command cgc = {};
+	struct request_sense sense = {};
+	int drive_lba = lba - 150;
+
+	cgc.cmd[0] = GPCMD_READ_CD;
+	cgc.cmd[2] = (drive_lba >> 24) & 0xFF;
+	cgc.cmd[3] = (drive_lba >> 16) & 0xFF;
+	cgc.cmd[4] = (drive_lba >> 8) & 0xFF;
+	cgc.cmd[5] = drive_lba & 0xFF;
+	cgc.cmd[6] = (cnt >> 16) & 0xFF;
+	cgc.cmd[7] = (cnt >> 8) & 0xFF;
+	cgc.cmd[8] = cnt & 0xFF;
+
+	// For CD-DA, the user-data field is the complete 2352-byte audio frame.
+	// Data tracks need sync, headers, user data and EDC/ECC for a raw frame.
+	cgc.cmd[9] = toc.tracks[track].type == TT_CDDA ? 0x10 : 0xF8;
+	cgc.buffer = buffer;
+	cgc.buflen = cnt * CD_SECTOR_LEN;
+	cgc.sense = &sense;
+	cgc.data_direction = CGC_DATA_READ;
+	cgc.quiet = 1;
+	cgc.timeout = 3000;
+
+	if (ioctl(physical_cd_fd, CDROM_SEND_PACKET, &cgc) < 0)
+	{
+		printf("PSX-CD: READ CD packet failed at LBA %d (%d sectors): %s\n",
+			drive_lba, cnt, strerror(errno));
+		return 0;
+	}
+	return 1;
+}
+
+static void physical_cd_read_sectors_uncached(uint8_t *buffer, int lba, int cnt)
+{
+	while (cnt > 0)
+	{
+		int track = physical_cd_track_for_lba(lba);
+		if (track < 0 || lba < 150)
+		{
+			memset(buffer, 0, CD_SECTOR_LEN);
+			buffer += CD_SECTOR_LEN;
+			lba++;
+			cnt--;
+			continue;
+		}
+
+		int chunk = cnt;
+		int remaining_in_track = toc.tracks[track].end - lba + 1;
+		if (chunk > remaining_in_track) chunk = remaining_in_track;
+		if (chunk > PHYSICAL_PACKET_SECTORS) chunk = PHYSICAL_PACKET_SECTORS;
+
+		if (!physical_cd_read_packet(buffer, lba, chunk, track))
+		{
+			// Some USB optical bridges do not expose MMC packet commands through
+			// this ioctl. Preserve compatibility with the older one-sector path.
+			for (int i = 0; i < chunk; i++)
+				physical_cd_read_sector(buffer + i * CD_SECTOR_LEN, lba + i);
+		}
+
+		buffer += chunk * CD_SECTOR_LEN;
+		lba += chunk;
+		cnt -= chunk;
+	}
+}
+
+static void physical_cache_invalidate()
+{
+	pthread_mutex_lock(&physical_cache_mutex);
+	for (int i = 0; i < PHYSICAL_CACHE_SLOTS; i++) physical_cache[i].valid = 0;
+	pthread_mutex_unlock(&physical_cache_mutex);
+}
+
+static void *physical_cache_worker(void *)
+{
+	// main() pins the process to CPU1 before creating this thread. Give the
+	// blocking optical worker access to both ARM cores so it doesn't compete
+	// exclusively with MiSTer's time-sensitive main loop.
+	cpu_set_t cpus;
+	CPU_ZERO(&cpus);
+	CPU_SET(0, &cpus);
+	CPU_SET(1, &cpus);
+	pthread_setaffinity_np(pthread_self(), sizeof(cpus), &cpus);
+
+	while (1)
+	{
+		pthread_mutex_lock(&physical_cache_mutex);
+		while (!physical_cache_busy) pthread_cond_wait(&physical_cache_cond, &physical_cache_mutex);
+		int slot = physical_cache_request_slot;
+		int lba = physical_cache_request_lba;
+		pthread_mutex_unlock(&physical_cache_mutex);
+
+		physical_cd_read_sectors_uncached(physical_cache[slot].data, lba, PHYSICAL_CACHE_SECTORS);
+
+		pthread_mutex_lock(&physical_cache_mutex);
+		physical_cache[slot].start_lba = lba;
+		physical_cache[slot].valid = physical_cd_enabled && physical_disc_present;
+		physical_cache_busy = 0;
+		pthread_cond_broadcast(&physical_cache_cond);
+		pthread_mutex_unlock(&physical_cache_mutex);
+	}
+	return NULL;
+}
+
+static void physical_cache_start()
+{
+	if (physical_cache_thread_started) return;
+	if (!pthread_create(&physical_cache_thread, NULL, physical_cache_worker, NULL))
+	{
+		physical_cache_thread_started = 1;
+		printf("PSX-CD: asynchronous read-ahead enabled (%d x %d sectors)\n",
+			PHYSICAL_CACHE_SLOTS, PHYSICAL_CACHE_SECTORS);
+	}
+	else
+	{
+		printf("PSX-CD: unable to start read-ahead worker\n");
+	}
+}
+
+static int physical_cache_find(int lba, int cnt)
+{
+	for (int i = 0; i < PHYSICAL_CACHE_SLOTS; i++)
+	{
+		if (physical_cache[i].valid && lba >= physical_cache[i].start_lba &&
+			(lba + cnt) <= (physical_cache[i].start_lba + PHYSICAL_CACHE_SECTORS)) return i;
+	}
+	return -1;
+}
+
+static void physical_cache_queue(int slot, int lba)
+{
+	physical_cache[slot].valid = 0;
+	physical_cache_request_slot = slot;
+	physical_cache_request_lba = lba;
+	physical_cache_busy = 1;
+	pthread_cond_signal(&physical_cache_cond);
+}
+
+static void physical_cd_read_sectors(uint8_t *buffer, int lba, int cnt)
+{
+	if (!physical_cache_thread_started)
+	{
+		physical_cd_read_sectors_uncached(buffer, lba, cnt);
+		return;
+	}
+
+	pthread_mutex_lock(&physical_cache_mutex);
+	int slot = physical_cache_find(lba, cnt);
+	while (slot < 0)
+	{
+		while (physical_cache_busy) pthread_cond_wait(&physical_cache_cond, &physical_cache_mutex);
+		slot = physical_cache_find(lba, cnt);
+		if (slot >= 0) break;
+
+		int target = 0;
+		if (physical_cache[0].valid && !physical_cache[1].valid) target = 1;
+		else if (physical_cache[0].valid && physical_cache[1].valid)
+			target = physical_cache[0].start_lba <= physical_cache[1].start_lba ? 0 : 1;
+		physical_cache_queue(target, lba);
+	}
+
+	memcpy(buffer, physical_cache[slot].data + (lba - physical_cache[slot].start_lba) * CD_SECTOR_LEN,
+		cnt * CD_SECTOR_LEN);
+
+	// Fill the alternate slot before sequential playback reaches it.
+	int next_lba = physical_cache[slot].start_lba + PHYSICAL_CACHE_SECTORS;
+	int other = slot ^ 1;
+	if (!physical_cache_busy && !physical_cache_find(next_lba, 1)) physical_cache_queue(other, next_lba);
+	pthread_mutex_unlock(&physical_cache_mutex);
+}
+
 int psx_chd_hunksize()
 {
 	if (toc.chd_f)
@@ -474,6 +817,11 @@ int psx_chd_hunksize()
 void psx_read_cd(uint8_t *buffer, int lba, int cnt)
 {
 	//printf("req lba=%d, cnt=%d\n", lba, cnt);
+	if (physical_cd_enabled)
+	{
+		physical_cd_read_sectors(buffer, lba, cnt);
+		return;
+	}
 
 	while (cnt > 0)
 	{
@@ -684,6 +1032,8 @@ static int load_bios(const char* filename)
 void psx_mount_cd(int f_index, int s_index, const char *filename)
 {
 	static char last_dir[1024] = {};
+	physical_cd_enabled = 0;
+	physical_cd_close();
 
 	int loaded = 0;
 
@@ -801,9 +1151,99 @@ void psx_mount_cd(int f_index, int s_index, const char *filename)
 	}
 }
 
+static int physical_cd_mount_inserted_disc()
+{
+	printf("PSX-CD: reading physical TOC\n");
+	fflush(stdout);
+	if (!physical_cd_load_toc(&toc)) return 0;
+
+	physical_disc_present = 1;
+	physical_cache_invalidate();
+	region_t region = region_t::UNKNOWN;
+	printf("PSX: Physical disc TOC loaded; region left on Auto\n");
+	fflush(stdout);
+
+	// Original discs carry their protection data physically. The current PSX
+	// FPGA interface represents LibCrypt through a mask, so unprotected discs
+	// use zero here. Protected-disc subchannel extraction is a follow-up backend
+	// extension and does not affect normal data or CD-audio operation.
+	printf("PSX-CD: sending TOC to core\n");
+	fflush(stdout);
+	send_cue_and_metadata(&toc, 0, region, 1);
+	printf("PSX-CD: mounting physical CD interface\n");
+	fflush(stdout);
+	user_io_set_index(1);
+	mount_cd(toc.end * CD_SECTOR_LEN, 1);
+	printf("PSX-CD: closing virtual lid\n");
+	fflush(stdout);
+	user_io_status_set("[42]", 0);
+	printf("PSX-CD: physical mount complete\n");
+	fflush(stdout);
+	return 1;
+}
+
+void psx_use_physical_cd()
+{
+	printf("PSX-CD: Use Physical Disc selected\n");
+	fflush(stdout);
+	physical_cd_enabled = 1;
+	physical_poll_timer = 0;
+	physical_disc_present = 0;
+	physical_cache_start();
+	physical_cache_invalidate();
+
+	if (!physical_cd_open())
+	{
+		mount_cd(0, 1);
+		user_io_status_set("[42]", 1);
+		Info("No physical CD drive found at /dev/sr0", 3000);
+		return;
+	}
+
+	printf("PSX-CD: opened %s\n", PHYSICAL_CD_DEVICE);
+	fflush(stdout);
+	if (ioctl(physical_cd_fd, CDROM_SELECT_SPEED, 0) < 0)
+		printf("PSX-CD: drive speed selection not supported: %s\n", strerror(errno));
+	else
+		printf("PSX-CD: requested maximum drive speed\n");
+	fflush(stdout);
+	if (!physical_cd_mount_inserted_disc())
+	{
+		mount_cd(0, 1);
+		user_io_status_set("[42]", 1);
+		Info("Physical CD mode enabled - insert a disc", 3000);
+		return;
+	}
+
+	Info("Physical PlayStation disc mounted", 2000);
+}
+
 void psx_poll()
 {
 	spi_uio_cmd(UIO_CD_GET);
+
+	if (physical_cd_enabled && (!physical_poll_timer || CheckTimer(physical_poll_timer)))
+	{
+		physical_poll_timer = GetTimer(500);
+		int present = physical_cd_has_disc();
+		if (present != physical_disc_present)
+		{
+			if (!present)
+			{
+				physical_disc_present = 0;
+				physical_cache_invalidate();
+				physical_cd_clear_toc();
+				mount_cd(0, 1);
+				user_io_status_set("[42]", 1);
+				printf("PSX: physical disc removed\n");
+			}
+			else
+			{
+				printf("PSX: physical disc inserted\n");
+				physical_cd_mount_inserted_disc();
+			}
+		}
+	}
 }
 
 void psx_reset()

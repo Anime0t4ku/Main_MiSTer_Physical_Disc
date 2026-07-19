@@ -2538,6 +2538,12 @@ void HandleUI(void)
 							int ex = (p[0] == 't') || (p[0] == 'r');
 							if (user_io_status_bits(p + 1, &bit, 0, ex) == 1)
 							{
+								if (is_psx() && bit == 93)
+								{
+									psx_use_physical_cd();
+									menustate = MENU_NONE1;
+									break;
+								}
 								const char *opt = p + 1;
 								if (!bit && (is_x86() || is_pcxt()))
 								{

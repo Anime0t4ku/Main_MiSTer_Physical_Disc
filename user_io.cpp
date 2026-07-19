@@ -349,7 +349,12 @@ char is_atari5200()
 static int is_psx_type = 0;
 char is_psx()
 {
-	if (!is_psx_type) is_psx_type = strcasecmp(orig_name, "PSX") ? 2 : 1;
+	if (!is_psx_type)
+	{
+		is_psx_type = (strcasecmp(orig_name, "PSX") &&
+			strcasecmp(orig_name, "PSX-CD") &&
+			strcasecmp(orig_name, "CD-PSX")) ? 2 : 1;
+	}
 	return (is_psx_type == 1);
 }
 
