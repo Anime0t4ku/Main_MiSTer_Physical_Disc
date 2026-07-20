@@ -6,6 +6,7 @@
 #define CDI_CDIC_BUFFER_SIZE (CDI_SECTOR_LEN + CDI_SUBCHANNEL_LEN)
 
 void cdi_mount_cd(int s_index, const char *filename);
+void cdi_use_physical_cd();
 void cdi_fill_blanksave(uint8_t *buffer, uint32_t lba, int cnt);
 void cdi_read_cd(uint8_t *buffer, int lba, int cnt);
 int cdi_chd_hunksize();

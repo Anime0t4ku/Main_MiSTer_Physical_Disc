@@ -9,6 +9,12 @@
 #include <assert.h>
 #include <inttypes.h>
 #include <memory>
+#include <climits>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <linux/cdrom.h>
 
 #include "../../file_io.h"
 #include "../../user_io.h"
@@ -77,6 +83,53 @@ static int chd_hunknum;
 static toc_t toc = {};
 CdgUnpacker cdg_unpack;
 bool sub_loaded_from_cdg;
+
+#define CDI_PHYSICAL_DEVICE "/dev/sr0"
+#define CDI_PHYSICAL_PACKET_SECTORS 16
+static int cdi_physical_fd = -1;
+static int cdi_physical_enabled = 0;
+static int cdi_physical_present = 0;
+static uint32_t cdi_physical_poll_timer = 0;
+
+static int cdi_physical_open()
+{
+	if (cdi_physical_fd >= 0) return 1;
+	cdi_physical_fd = open(CDI_PHYSICAL_DEVICE, O_RDONLY | O_NONBLOCK);
+	if (cdi_physical_fd < 0) printf("CDI-CD: cannot open %s: %s\n", CDI_PHYSICAL_DEVICE, strerror(errno));
+	return cdi_physical_fd >= 0;
+}
+
+static int cdi_physical_has_disc()
+{
+	return cdi_physical_open() && ioctl(cdi_physical_fd, CDROM_DRIVE_STATUS, CDSL_CURRENT) == CDS_DISC_OK;
+}
+
+static int cdi_physical_load_toc()
+{
+	struct cdrom_tochdr header = {};
+	struct cdrom_tocentry entries[100] = {};
+	if (!cdi_physical_has_disc() || ioctl(cdi_physical_fd, CDROMREADTOCHDR, &header) < 0) return 0;
+	int count = header.cdth_trk1 - header.cdth_trk0 + 1;
+	if (count < 1 || count > 99) return 0;
+	for (int i = 0; i <= count; i++) {
+		entries[i].cdte_track = i == count ? CDROM_LEADOUT : header.cdth_trk0 + i;
+		entries[i].cdte_format = CDROM_LBA;
+		if (ioctl(cdi_physical_fd, CDROMREADTOCENTRY, &entries[i]) < 0) return 0;
+	}
+	memset(&toc, 0, sizeof(toc));
+	for (int i = 0; i < count; i++) {
+		toc.tracks[i].start = entries[i].cdte_addr.lba + 150;
+		toc.tracks[i].end = entries[i + 1].cdte_addr.lba + 149;
+		toc.tracks[i].sector_size = CDI_SECTOR_LEN;
+		toc.tracks[i].type = (entries[i].cdte_ctrl & CDROM_DATA_TRACK) ? TT_MODE2 : TT_CDDA;
+		toc.tracks[i].indexes[1] = i ? 0 : 150;
+		printf("CDI-CD: track %d start=%u end=%u type=%s\n", i + 1,
+			toc.tracks[i].start, toc.tracks[i].end, toc.tracks[i].type ? "data" : "audio");
+	}
+	toc.last = count;
+	toc.end = entries[count].cdte_addr.lba + 150;
+	return 1;
+}
 
 static int sgets(char* out, int sz, char** in)
 {
@@ -871,8 +924,62 @@ void subcode_q_data(int lba, struct subcode& out)
 #endif
 }
 
+static int cdi_physical_read_packet(uint8_t* buffer, int lba, int cnt)
+{
+	if (cdi_physical_fd < 0 || lba < 150 || cnt < 1) return 0;
+	struct cdrom_generic_command cgc = {};
+	struct request_sense sense = {};
+	int drive_lba = lba - 150;
+	cgc.cmd[0] = GPCMD_READ_CD;
+	cgc.cmd[2] = (drive_lba >> 24) & 0xff;
+	cgc.cmd[3] = (drive_lba >> 16) & 0xff;
+	cgc.cmd[4] = (drive_lba >> 8) & 0xff;
+	cgc.cmd[5] = drive_lba & 0xff;
+	cgc.cmd[6] = (cnt >> 16) & 0xff;
+	cgc.cmd[7] = (cnt >> 8) & 0xff;
+	cgc.cmd[8] = cnt & 0xff;
+	cgc.cmd[9] = 0xf8;
+	cgc.buffer = buffer;
+	cgc.buflen = cnt * CDI_SECTOR_LEN;
+	cgc.sense = &sense;
+	cgc.data_direction = CGC_DATA_READ;
+	cgc.quiet = 1;
+	cgc.timeout = 3000;
+	if (ioctl(cdi_physical_fd, CDROM_SEND_PACKET, &cgc) < 0) {
+		printf("CDI-CD: READ CD failed at LBA %d (%d sectors): %s\n", drive_lba, cnt, strerror(errno));
+		return 0;
+	}
+	return 1;
+}
+
+static void cdi_physical_read_cd(uint8_t* buffer, int lba, int cnt)
+{
+	std::array<uint8_t, CDI_PHYSICAL_PACKET_SECTORS * CDI_SECTOR_LEN> raw;
+	while (cnt > 0) {
+		int chunk = cnt > CDI_PHYSICAL_PACKET_SECTORS ? CDI_PHYSICAL_PACKET_SECTORS : cnt;
+		if (lba < 150 || lba >= (int)toc.end) chunk = 1;
+		int ok = lba >= 150 && lba < (int)toc.end && cdi_physical_read_packet(raw.data(), lba, chunk);
+		for (int i = 0; i < chunk; i++) {
+			if (ok) memcpy(buffer, raw.data() + i * CDI_SECTOR_LEN, CDI_SECTOR_LEN);
+			else memset(buffer, 0, CDI_SECTOR_LEN);
+			check_scramble(lba, buffer);
+			buffer += CDI_SECTOR_LEN;
+			struct subcode& subcode_out = *reinterpret_cast<struct subcode*>(buffer);
+			subcode_q_data(lba, subcode_out);
+			memset(subcode_out.rw, 0, sizeof(subcode_out.rw));
+			buffer += sizeof(struct subcode);
+			lba++;
+			cnt--;
+		}
+	}
+}
+
 void cdi_read_cd(uint8_t* buffer, int lba, int cnt)
 {
+	if (cdi_physical_enabled) {
+		cdi_physical_read_cd(buffer, lba, cnt);
+		return;
+	}
 	int calc_lba = lba;
 	uint8_t am;
 	am = calc_lba / (60 * 75);
@@ -1087,6 +1194,7 @@ static char last_dir[1024] = "";
 
 void cdi_mount_cd(int s_index, const char* filename)
 {
+	cdi_physical_enabled = 0;
 	int loaded = 0;
 
 	if (strlen(filename))
@@ -1131,7 +1239,60 @@ void cdi_mount_cd(int s_index, const char* filename)
 	}
 }
 
-void cdi_poll() {}
+static int cdi_mount_physical_disc()
+{
+	if (toc.chd_f) unload_chd(&toc);
+	else unload_cue(&toc);
+	if (!cdi_physical_load_toc()) return 0;
+	prepare_toc_buffer(&toc);
+	user_io_set_index(0);
+	mount_cd(toc.end * CDI_SECTOR_LEN, 0);
+	return 1;
+}
+
+static void cdi_physical_reset()
+{
+	user_io_status_set("[0]", 1);
+	user_io_status_set("[0]", 0);
+}
+
+void cdi_use_physical_cd()
+{
+	printf("CDI-CD: Use Physical Disc selected\n");
+	cdi_physical_enabled = 1;
+	cdi_physical_poll_timer = 0;
+	if (!cdi_physical_open()) {
+		Info("Unable to open /dev/sr0", 3000);
+		return;
+	}
+	ioctl(cdi_physical_fd, CDROM_SELECT_SPEED, 0);
+	cdi_physical_present = cdi_physical_has_disc();
+	if (!cdi_physical_present || !cdi_mount_physical_disc()) {
+		mount_cd(0, 0);
+		Info("Physical CD-i mode enabled - insert a disc", 3000);
+		return;
+	}
+	cdi_physical_reset();
+	Info("Physical CD-i disc mounted", 2000);
+}
+
+void cdi_poll()
+{
+	if (!cdi_physical_enabled || (cdi_physical_poll_timer && !CheckTimer(cdi_physical_poll_timer))) return;
+	cdi_physical_poll_timer = GetTimer(500);
+	int present = cdi_physical_has_disc();
+	if (present == cdi_physical_present) return;
+	cdi_physical_present = present;
+	if (present && cdi_mount_physical_disc()) {
+		cdi_physical_reset();
+		Info("Physical CD-i disc mounted", 2000);
+	}
+	else {
+		memset(&toc, 0, sizeof(toc));
+		mount_cd(0, 0);
+		Info("Physical CD-i disc removed", 2000);
+	}
+}
 
 void cdi_load_root_nvram()
 {
