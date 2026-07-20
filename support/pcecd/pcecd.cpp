@@ -14,12 +14,37 @@
 
 static int need_reset=0;
 static uint8_t has_command = 0;
+static int pce_physical_enabled = 0;
+static int pce_physical_present = 0;
+static uint32_t pce_physical_poll_timer = 0;
+static void notify_mount(int load);
 
 void pcecd_poll()
 {
 	static uint32_t poll_timer = 0;
 	static uint8_t last_req = 0;
 	static uint8_t adj = 0;
+
+	if (pce_physical_enabled && (!pce_physical_poll_timer || CheckTimer(pce_physical_poll_timer))) {
+		pce_physical_poll_timer = GetTimer(500);
+		int present = pcecdd_t::PhysicalDiscPresent();
+		if (present != pce_physical_present) {
+			pce_physical_present = present;
+			if (present) {
+				printf("PCECD: physical disc inserted\n");
+				pcecdd.LoadPhysical();
+				pcecdd.state = pcecdd.loaded ? PCECD_STATE_IDLE : PCECD_STATE_NODISC;
+				pcecdd.latency = 10;
+				pcecdd.SendData = pcecd_send_data;
+				notify_mount(1);
+			} else {
+				printf("PCECD: physical disc removed\n");
+				pcecdd.Unload();
+				pcecdd.state = PCECD_STATE_NODISC;
+				notify_mount(0);
+			}
+		}
+	}
 
 	if (!poll_timer) poll_timer = GetTimer(13);
 
@@ -192,6 +217,7 @@ static int load_bios(char *biosname, const char *cuename, int sgx)
 void pcecd_set_image(int num, const char *filename)
 {
 	(void)num;
+	pce_physical_enabled = 0;
 
 	pcecdd.Unload();
 	pcecdd.state = PCECD_STATE_NODISC;
@@ -244,6 +270,34 @@ void pcecd_set_image(int num, const char *filename)
 		notify_mount(0);
 		pcecdd.state = PCECD_STATE_NODISC;
 	}
+}
+
+void pcecd_use_physical_cd()
+{
+	printf("PCECD: Use Physical Disc selected\n");
+	pce_physical_enabled = 1;
+	pce_physical_poll_timer = 0;
+	pce_physical_present = pcecdd_t::PhysicalDiscPresent();
+	pcecdd.Unload();
+
+	sprintf(buf, "%s/cd_bios.rom", HomeDir(PCECD_DIR));
+	char physical_name[1024];
+	sprintf(physical_name, "%s/Physical Disc.cue", HomeDir(PCECD_DIR));
+	int bios_loaded = load_bios(buf, physical_name, 0);
+	if (!bios_loaded) Info("CD BIOS not found!", 4000);
+
+	if (!pce_physical_present || !pcecdd.LoadPhysical()) {
+		pcecdd.state = PCECD_STATE_NODISC;
+		notify_mount(0);
+		Info("Physical CD mode enabled - insert a disc", 3000);
+		return;
+	}
+	pcecdd.state = PCECD_STATE_IDLE;
+	pcecdd.latency = 10;
+	pcecdd.SendData = pcecd_send_data;
+	notify_mount(1);
+	pcecd_reset();
+	Info("Physical TurboGrafx CD mounted", 2000);
 }
 
 int pcecd_send_data(uint8_t* buf, int len, uint8_t index) {
