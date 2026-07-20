@@ -2550,6 +2550,12 @@ void HandleUI(void)
 									menustate = MENU_NONE1;
 									break;
 								}
+								if (is_pce() && bit == 93)
+								{
+									pcecd_use_physical_cd();
+									menustate = MENU_NONE1;
+									break;
+								}
 								if (is_saturn() && bit == 93)
 								{
 									saturn_use_physical_cd();

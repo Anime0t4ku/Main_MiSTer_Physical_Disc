@@ -1486,6 +1486,9 @@ void psx_use_physical_cd()
 
 void psx_poll()
 {
+	if (!physical_cd_enabled && !strcasecmp(user_io_get_core_name(), "CD-PSX"))
+		psx_use_physical_cd();
+
 	spi_uio_cmd(UIO_CD_GET);
 	if (physical_cd_enabled) psx_physical_stats_poll();
 

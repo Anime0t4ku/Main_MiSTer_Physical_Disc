@@ -1278,6 +1278,9 @@ void cdi_use_physical_cd()
 
 void cdi_poll()
 {
+	if (!cdi_physical_enabled && !strcasecmp(user_io_get_core_name(), "CD-CDi"))
+		cdi_use_physical_cd();
+
 	if (!cdi_physical_enabled || (cdi_physical_poll_timer && !CheckTimer(cdi_physical_poll_timer))) return;
 	cdi_physical_poll_timer = GetTimer(500);
 	int present = cdi_physical_has_disc();

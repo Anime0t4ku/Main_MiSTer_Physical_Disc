@@ -48,6 +48,9 @@ void saturn_poll()
 	static unsigned long poll_timer = 0;
 	static uint8_t last_req = 255;
 
+	if (!saturn_physical_enabled && !strcasecmp(user_io_get_core_name(), "CD-Saturn"))
+		saturn_use_physical_cd();
+
 	if (saturn_physical_enabled && (!saturn_physical_poll_timer || CheckTimer(saturn_physical_poll_timer))) {
 		saturn_physical_poll_timer = GetTimer(500);
 		int present = satcdd_t::PhysicalDiscPresent();

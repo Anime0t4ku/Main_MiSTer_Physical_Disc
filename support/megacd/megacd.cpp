@@ -29,6 +29,9 @@ void mcd_poll()
 	static uint8_t last_req = 255;
 	static uint8_t adj = 0;
 
+	if (!mcd_physical_enabled && !strcasecmp(user_io_get_core_name(), "CD-MegaCD"))
+		mcd_use_physical_cd();
+
 	if (mcd_physical_enabled && (!mcd_physical_poll_timer || CheckTimer(mcd_physical_poll_timer))) {
 		mcd_physical_poll_timer = GetTimer(500);
 		int present = cdd_t::PhysicalDiscPresent();

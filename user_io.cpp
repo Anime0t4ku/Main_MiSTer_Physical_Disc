@@ -284,7 +284,7 @@ char is_megacd()
 static int is_pce_type = 0;
 char is_pce()
 {
-	if (!is_pce_type) is_pce_type = strcasecmp(orig_name, "TGFX16") ? 2 : 1;
+	if (!is_pce_type) is_pce_type = (strcasecmp(orig_name, "TGFX16") && strcasecmp(orig_name, "CD-TGFX16")) ? 2 : 1;
 	return (is_pce_type == 1);
 }
 
