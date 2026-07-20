@@ -3,6 +3,13 @@
 #include <string.h>
 #include <inttypes.h>
 #include <time.h>
+#include <errno.h>
+#include <climits>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <linux/cdrom.h>
+#include <pthread.h>
 
 #include "saturn.h"
 #include "../../shmem.h"
@@ -12,7 +19,183 @@
 
 satcdd_t satcdd;
 
+#define SAT_PHYSICAL_DEVICE "/dev/sr0"
+#define SAT_PHYSICAL_SECTOR_SIZE 2352
+#define SAT_PHYSICAL_CACHE_SLOTS 2
+#define SAT_PHYSICAL_CACHE_SECTORS 16
+#define SAT_PHYSICAL_PACKET_SECTORS 32
+
+struct sat_physical_cache_t {
+	int start_lba;
+	int valid;
+	uint8_t data[SAT_PHYSICAL_CACHE_SECTORS * SAT_PHYSICAL_SECTOR_SIZE];
+};
+
+static int sat_physical_fd = -1;
+static toc_t *sat_physical_toc = NULL;
+static sat_physical_cache_t sat_physical_cache[SAT_PHYSICAL_CACHE_SLOTS] = {};
+static pthread_mutex_t sat_physical_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t sat_physical_cond = PTHREAD_COND_INITIALIZER;
+static pthread_t sat_physical_thread;
+static int sat_physical_thread_started;
+static int sat_physical_busy;
+static int sat_physical_request_slot;
+static int sat_physical_request_lba;
+
+static int sat_physical_open()
+{
+	if (sat_physical_fd >= 0) return 1;
+	sat_physical_fd = open(SAT_PHYSICAL_DEVICE, O_RDONLY | O_NONBLOCK);
+	if (sat_physical_fd < 0) {
+		printf("SAT-CD: cannot open %s: %s\n", SAT_PHYSICAL_DEVICE, strerror(errno));
+		return 0;
+	}
+	return 1;
+}
+
+int satcdd_t::PhysicalDiscPresent()
+{
+	return sat_physical_open() && ioctl(sat_physical_fd, CDROM_DRIVE_STATUS, CDSL_CURRENT) == CDS_DISC_OK;
+}
+
+static int sat_physical_track_for_lba(int lba)
+{
+	if (!sat_physical_toc) return -1;
+	for (int i = 0; i < sat_physical_toc->last; i++)
+		if (lba >= sat_physical_toc->tracks[i].start && lba < sat_physical_toc->tracks[i].end) return i;
+	return -1;
+}
+
+static int sat_physical_read_packet(uint8_t *buffer, int lba, int count, int track)
+{
+	if (sat_physical_fd < 0 || count < 1 || track < 0) return 0;
+	struct cdrom_generic_command cgc = {};
+	struct request_sense sense = {};
+	cgc.cmd[0] = GPCMD_READ_CD;
+	cgc.cmd[2] = (lba >> 24) & 0xff;
+	cgc.cmd[3] = (lba >> 16) & 0xff;
+	cgc.cmd[4] = (lba >> 8) & 0xff;
+	cgc.cmd[5] = lba & 0xff;
+	cgc.cmd[6] = (count >> 16) & 0xff;
+	cgc.cmd[7] = (count >> 8) & 0xff;
+	cgc.cmd[8] = count & 0xff;
+	cgc.cmd[9] = sat_physical_toc->tracks[track].type == TT_CDDA ? 0x10 : 0xf8;
+	cgc.buffer = buffer;
+	cgc.buflen = count * SAT_PHYSICAL_SECTOR_SIZE;
+	cgc.sense = &sense;
+	cgc.data_direction = CGC_DATA_READ;
+	cgc.quiet = 1;
+	cgc.timeout = 3000;
+	return ioctl(sat_physical_fd, CDROM_SEND_PACKET, &cgc) >= 0;
+}
+
+static void sat_physical_read_uncached(uint8_t *buffer, int lba, int count)
+{
+	while (count > 0) {
+		int track = sat_physical_track_for_lba(lba);
+		if (track < 0) {
+			memset(buffer, 0, SAT_PHYSICAL_SECTOR_SIZE);
+			buffer += SAT_PHYSICAL_SECTOR_SIZE; lba++; count--;
+			continue;
+		}
+		int chunk = count;
+		int remaining = sat_physical_toc->tracks[track].end - lba;
+		if (chunk > remaining) chunk = remaining;
+		if (chunk > SAT_PHYSICAL_PACKET_SECTORS) chunk = SAT_PHYSICAL_PACKET_SECTORS;
+		if (!sat_physical_read_packet(buffer, lba, chunk, track)) {
+			printf("SAT-CD: READ CD failed at LBA %d (%d sectors): %s\n", lba, chunk, strerror(errno));
+			memset(buffer, 0, chunk * SAT_PHYSICAL_SECTOR_SIZE);
+		}
+		buffer += chunk * SAT_PHYSICAL_SECTOR_SIZE; lba += chunk; count -= chunk;
+	}
+}
+
+static void sat_physical_cache_invalidate()
+{
+	pthread_mutex_lock(&sat_physical_mutex);
+	while (sat_physical_busy) pthread_cond_wait(&sat_physical_cond, &sat_physical_mutex);
+	for (int i = 0; i < SAT_PHYSICAL_CACHE_SLOTS; i++) sat_physical_cache[i].valid = 0;
+	pthread_mutex_unlock(&sat_physical_mutex);
+}
+
+static int sat_physical_cache_find(int lba, int count)
+{
+	for (int i = 0; i < SAT_PHYSICAL_CACHE_SLOTS; i++)
+		if (sat_physical_cache[i].valid && lba >= sat_physical_cache[i].start_lba &&
+			(lba + count) <= sat_physical_cache[i].start_lba + SAT_PHYSICAL_CACHE_SECTORS) return i;
+	return -1;
+}
+
+static void sat_physical_cache_queue(int slot, int lba)
+{
+	sat_physical_cache[slot].valid = 0;
+	sat_physical_request_slot = slot;
+	sat_physical_request_lba = lba;
+	sat_physical_busy = 1;
+	pthread_cond_signal(&sat_physical_cond);
+}
+
+static void *sat_physical_worker(void *)
+{
+	while (1) {
+		pthread_mutex_lock(&sat_physical_mutex);
+		while (!sat_physical_busy) pthread_cond_wait(&sat_physical_cond, &sat_physical_mutex);
+		int slot = sat_physical_request_slot;
+		int lba = sat_physical_request_lba;
+		pthread_mutex_unlock(&sat_physical_mutex);
+		sat_physical_read_uncached(sat_physical_cache[slot].data, lba, SAT_PHYSICAL_CACHE_SECTORS);
+		pthread_mutex_lock(&sat_physical_mutex);
+		sat_physical_cache[slot].start_lba = lba;
+		sat_physical_cache[slot].valid = sat_physical_toc && satcdd.IsPhysical();
+		sat_physical_busy = 0;
+		pthread_cond_broadcast(&sat_physical_cond);
+		pthread_mutex_unlock(&sat_physical_mutex);
+	}
+	return NULL;
+}
+
+static void sat_physical_cache_start()
+{
+	if (sat_physical_thread_started) return;
+	if (!pthread_create(&sat_physical_thread, NULL, sat_physical_worker, NULL)) {
+		sat_physical_thread_started = 1;
+		printf("SAT-CD: asynchronous read-ahead enabled (2 x 16 sectors)\n");
+	}
+}
+
+static void sat_physical_read(uint8_t *buffer, int lba, int count)
+{
+	if (!sat_physical_thread_started) { sat_physical_read_uncached(buffer, lba, count); return; }
+	pthread_mutex_lock(&sat_physical_mutex);
+	int slot = sat_physical_cache_find(lba, count);
+	if (slot < 0) {
+		while (sat_physical_busy) pthread_cond_wait(&sat_physical_cond, &sat_physical_mutex);
+		slot = sat_physical_cache_find(lba, count);
+		if (slot < 0) {
+			int target = !sat_physical_cache[1].valid ? 1 : 0;
+			sat_physical_cache_queue(target, lba);
+			while (sat_physical_busy) pthread_cond_wait(&sat_physical_cond, &sat_physical_mutex);
+			slot = sat_physical_cache_find(lba, count);
+		}
+	}
+	if (slot >= 0) {
+		memcpy(buffer, sat_physical_cache[slot].data + (lba - sat_physical_cache[slot].start_lba) * SAT_PHYSICAL_SECTOR_SIZE,
+			count * SAT_PHYSICAL_SECTOR_SIZE);
+		int next_lba = sat_physical_cache[slot].start_lba + SAT_PHYSICAL_CACHE_SECTORS;
+		if (sat_physical_toc && next_lba < sat_physical_toc->end && !sat_physical_busy && sat_physical_cache_find(next_lba, 1) < 0)
+			sat_physical_cache_queue(slot ^ 1, next_lba);
+	} else memset(buffer, 0, count * SAT_PHYSICAL_SECTOR_SIZE);
+	pthread_mutex_unlock(&sat_physical_mutex);
+}
+
+static void sat_physical_set_max_speed()
+{
+	if (sat_physical_fd < 0) return;
+	ioctl(sat_physical_fd, CDROM_SELECT_SPEED, 0);
+}
+
 satcdd_t::satcdd_t() {
+	physical = false;
 	loaded = 0;
 	state = Open;
 	lid_open = true;
@@ -394,8 +577,54 @@ int satcdd_t::Load(const char *filename)
 	return 0;
 }
 
+int satcdd_t::LoadPhysical()
+{
+	Unload();
+	if (!PhysicalDiscPresent()) return 0;
+	struct cdrom_tochdr header = {};
+	if (ioctl(sat_physical_fd, CDROMREADTOCHDR, &header) < 0) return 0;
+	int count = header.cdth_trk1 - header.cdth_trk0 + 1;
+	if (count < 1 || count > 99) return 0;
+	struct cdrom_tocentry entries[100] = {};
+	for (int i = 0; i < count; i++) {
+		entries[i].cdte_track = header.cdth_trk0 + i;
+		entries[i].cdte_format = CDROM_LBA;
+		if (ioctl(sat_physical_fd, CDROMREADTOCENTRY, &entries[i]) < 0) return 0;
+	}
+	entries[count].cdte_track = CDROM_LEADOUT;
+	entries[count].cdte_format = CDROM_LBA;
+	if (ioctl(sat_physical_fd, CDROMREADTOCENTRY, &entries[count]) < 0) return 0;
+	for (int i = 0; i < count; i++) {
+		toc.tracks[i].start = entries[i].cdte_addr.lba;
+		toc.tracks[i].end = entries[i + 1].cdte_addr.lba;
+		toc.tracks[i].sector_size = SAT_PHYSICAL_SECTOR_SIZE;
+		toc.tracks[i].type = (entries[i].cdte_ctrl & CDROM_DATA_TRACK) ? TT_MODE1 : TT_CDDA;
+		toc.tracks[i].index_num = 2;
+		toc.tracks[i].indexes[1] = 0;
+		printf("SAT-CD: track %d start=%d end=%d type=%s\n", i + 1, toc.tracks[i].start,
+			toc.tracks[i].end, toc.tracks[i].type == TT_CDDA ? "audio" : "data");
+	}
+	toc.last = count;
+	toc.end = entries[count].cdte_addr.lba;
+	toc.tracks[count].start = toc.end;
+	sectorSize = SAT_PHYSICAL_SECTOR_SIZE;
+	physical = true;
+	loaded = 1;
+	lid_open = false;
+	stop_pend = true;
+	sat_physical_toc = &toc;
+	sat_physical_cache_start();
+	sat_physical_cache_invalidate();
+	sat_physical_set_max_speed();
+	return 1;
+}
+
+int satcdd_t::IsPhysical() const { return physical; }
+
 void satcdd_t::Unload()
 {
+	sat_physical_cache_invalidate();
+	sat_physical_toc = NULL;
 	if (this->loaded)
 	{
 		if (this->toc.chd_f)
@@ -422,6 +651,7 @@ void satcdd_t::Unload()
 
 	memset(&this->toc, 0x00, sizeof(this->toc));
 	this->sectorSize = 0;
+	this->physical = false;
 
 #ifdef SATURN_DEBUG
 	printf("\x1b[32mSaturn: ");
@@ -432,6 +662,12 @@ void satcdd_t::Unload()
 
 int satcdd_t::GetBootHeader(uint8_t *buf) {
 	if (this->toc.last < 0) return -1;
+	if (this->physical) {
+		uint8_t raw[SAT_PHYSICAL_SECTOR_SIZE];
+		sat_physical_read(raw, 0, 1);
+		memcpy(buf, raw + 16, 256);
+		return 1;
+	}
 	
 	int offset = 16;
 	if (this->toc.tracks[0].sector_size == 2048)
@@ -1194,7 +1430,11 @@ void satcdd_t::ReadData(uint8_t *buf)
 	if (this->toc.tracks[this->track].type)
 	{
 		int lba_ = this->lba >= 0 ? this->lba : 0;
-		if (this->toc.chd_f)
+		if (this->physical)
+		{
+			sat_physical_read(buf, lba_, 1);
+		}
+		else if (this->toc.chd_f)
 		{
 			int read_offset = 0;
 			if (this->toc.tracks[this->track].sector_size == 2048)
@@ -1230,7 +1470,12 @@ int satcdd_t::ReadCDDA(uint8_t *buf, int first)
 	int sec_offs = first ? 0 : 1;
 
 	uint8_t *dest = buf;
-	if (this->toc.chd_f)
+	if (this->physical)
+	{
+		for (int i = sec_offs; i < 2; i++, dest += 4096)
+			sat_physical_read(dest, this->lba + i, 1);
+	}
+	else if (this->toc.chd_f)
 	{
 		for (int i = sec_offs; i < 2; i++, dest += 4096)
 		{

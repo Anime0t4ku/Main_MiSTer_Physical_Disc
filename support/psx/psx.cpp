@@ -11,6 +11,7 @@
 #include <linux/cdrom.h>
 #include <pthread.h>
 #include <sched.h>
+#include <time.h>
 
 #include "../../file_io.h"
 #include "../../user_io.h"
@@ -33,13 +34,14 @@ static int physical_disc_present = 0;
 static uint32_t physical_poll_timer = 0;
 
 #define PHYSICAL_CD_DEVICE "/dev/sr0"
-#define PHYSICAL_CACHE_SLOTS 2
+#define PHYSICAL_CACHE_SLOTS 4
 #define PHYSICAL_CACHE_SECTORS 64
 #define PHYSICAL_PACKET_SECTORS 16
 
 struct physical_cache_slot_t
 {
 	int start_lba;
+	int valid_sectors;
 	int valid;
 	uint8_t data[PHYSICAL_CACHE_SECTORS * 2352];
 };
@@ -52,6 +54,113 @@ static int physical_cache_thread_started = 0;
 static int physical_cache_busy = 0;
 static int physical_cache_request_slot = 0;
 static int physical_cache_request_lba = 0;
+static int physical_cache_request_sectors = PHYSICAL_CACHE_SECTORS;
+static int physical_cache_request_prefetch = 0;
+static int physical_stream_lba = -1;
+static int physical_cache_demand_waiting = 0;
+static int physical_cache_schedule_prefetch_locked();
+
+static pthread_mutex_t psx_stats_mutex = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t psx_stats_packet_calls;
+static uint64_t psx_stats_packet_sectors;
+static uint64_t psx_stats_packet_ms;
+static uint32_t psx_stats_packet_max_ms;
+static uint64_t psx_stats_packet_failures;
+static uint64_t psx_stats_fallback_sectors;
+static uint64_t psx_stats_cache_hits;
+static uint64_t psx_stats_cache_misses;
+static uint64_t psx_stats_cache_wait_ms;
+static uint32_t psx_stats_cache_wait_max_ms;
+static uint64_t psx_stats_read_calls;
+static uint64_t psx_stats_read_sectors;
+static uint64_t psx_stats_sequential_reads;
+static uint64_t psx_stats_random_reads;
+static int psx_stats_last_read_end = -1;
+static uint32_t psx_stats_timer;
+
+#define PSX_MISS_TRACE_MAX 256
+struct psx_miss_trace_t {
+	uint32_t t;
+	int lba, cnt, sequential, busy, worker_lba, worker_sectors, worker_prefetch, stream_lba;
+	int valid[PHYSICAL_CACHE_SLOTS];
+	int start[PHYSICAL_CACHE_SLOTS];
+	int end[PHYSICAL_CACHE_SLOTS];
+	uint32_t wait_ms;
+};
+static psx_miss_trace_t psx_miss_trace[PSX_MISS_TRACE_MAX];
+static int psx_miss_trace_count;
+static int psx_miss_trace_dumped;
+
+static uint32_t psx_stats_now_ms()
+{
+	struct timespec tp;
+	clock_gettime(CLOCK_MONOTONIC, &tp);
+	return (uint32_t)(tp.tv_sec * 1000ULL + tp.tv_nsec / 1000000);
+}
+
+static void psx_physical_stats_reset()
+{
+	pthread_mutex_lock(&psx_stats_mutex);
+	psx_stats_packet_calls = psx_stats_packet_sectors = psx_stats_packet_ms = 0;
+	psx_stats_packet_max_ms = 0;
+	psx_stats_packet_failures = psx_stats_fallback_sectors = 0;
+	psx_stats_cache_hits = psx_stats_cache_misses = psx_stats_cache_wait_ms = 0;
+	psx_stats_cache_wait_max_ms = 0;
+	psx_stats_read_calls = psx_stats_read_sectors = 0;
+	psx_stats_sequential_reads = psx_stats_random_reads = 0;
+	psx_stats_last_read_end = -1;
+	psx_stats_timer = GetTimer(5000);
+	pthread_mutex_unlock(&psx_stats_mutex);
+	FILE *f = fopen("/tmp/psx_physical_stats.log", "w");
+	if (f) {
+		fprintf(f, "PSX physical-disc telemetry started (v0.18 interruptible prefetch)\n");
+		fclose(f);
+	}
+	psx_miss_trace_count = psx_miss_trace_dumped = 0;
+	f = fopen("/tmp/psx_physical_misses.log", "w");
+	if (f) {
+		fprintf(f, "PSX cache miss trace: t lba cnt seq busy worker_lba worker_sectors prefetch stream slots(start-end) wait\n");
+		fclose(f);
+	}
+}
+
+static void psx_physical_stats_poll()
+{
+	if (!psx_stats_timer || !CheckTimer(psx_stats_timer)) return;
+	psx_stats_timer = GetTimer(5000);
+	pthread_mutex_lock(&psx_stats_mutex);
+	uint64_t pc = psx_stats_packet_calls, ps = psx_stats_packet_sectors, pm = psx_stats_packet_ms;
+	uint32_t pmax = psx_stats_packet_max_ms;
+	uint64_t pf = psx_stats_packet_failures, fb = psx_stats_fallback_sectors;
+	uint64_t hit = psx_stats_cache_hits, miss = psx_stats_cache_misses, wm = psx_stats_cache_wait_ms;
+	uint32_t wmax = psx_stats_cache_wait_max_ms;
+	uint64_t rc = psx_stats_read_calls, rs = psx_stats_read_sectors;
+	uint64_t seq = psx_stats_sequential_reads, rnd = psx_stats_random_reads;
+	pthread_mutex_unlock(&psx_stats_mutex);
+	FILE *f = fopen("/tmp/psx_physical_stats.log", "a");
+	if (f) {
+		fprintf(f, "t=%lu reads=%llu sectors=%llu sequential=%llu random=%llu packets=%llu packet_sectors=%llu packet_avg=%.1fms packet_max=%ums failures=%llu fallback_sectors=%llu cache_hit=%llu cache_miss=%llu wait_avg=%.1fms wait_max=%ums\n",
+			GetTimer(0) / 1000, (unsigned long long)rc, (unsigned long long)rs,
+			(unsigned long long)seq, (unsigned long long)rnd, (unsigned long long)pc,
+			(unsigned long long)ps, pc ? (double)pm / pc : 0.0, pmax,
+			(unsigned long long)pf, (unsigned long long)fb, (unsigned long long)hit,
+			(unsigned long long)miss, miss ? (double)wm / miss : 0.0, wmax);
+		fclose(f);
+	}
+	f = fopen("/tmp/psx_physical_misses.log", "a");
+	if (f) {
+		while (psx_miss_trace_dumped < psx_miss_trace_count) {
+			psx_miss_trace_t *e = &psx_miss_trace[psx_miss_trace_dumped++];
+			fprintf(f, "t=%u lba=%d cnt=%d seq=%d busy=%d worker=%d+%d prefetch=%d stream=%d slots=",
+				e->t, e->lba, e->cnt, e->sequential, e->busy, e->worker_lba,
+				e->worker_sectors, e->worker_prefetch, e->stream_lba);
+			for (int i = 0; i < PHYSICAL_CACHE_SLOTS; i++)
+				fprintf(f, "%s%s%d-%d", i ? "," : "", e->valid[i] ? "" : "!", e->start[i], e->end[i]);
+			fprintf(f, " wait=%ums\n", e->wait_ms);
+		}
+		fclose(f);
+	}
+}
 
 static int sgets(char *out, int sz, char **in)
 {
@@ -658,7 +767,17 @@ static int physical_cd_read_packet(uint8_t *buffer, int lba, int cnt, int track)
 	cgc.quiet = 1;
 	cgc.timeout = 3000;
 
-	if (ioctl(physical_cd_fd, CDROM_SEND_PACKET, &cgc) < 0)
+	uint32_t started = psx_stats_now_ms();
+	int ok = ioctl(physical_cd_fd, CDROM_SEND_PACKET, &cgc) >= 0;
+	uint32_t elapsed = psx_stats_now_ms() - started;
+	pthread_mutex_lock(&psx_stats_mutex);
+	psx_stats_packet_calls++;
+	psx_stats_packet_sectors += cnt;
+	psx_stats_packet_ms += elapsed;
+	if (elapsed > psx_stats_packet_max_ms) psx_stats_packet_max_ms = elapsed;
+	if (!ok) psx_stats_packet_failures++;
+	pthread_mutex_unlock(&psx_stats_mutex);
+	if (!ok)
 	{
 		printf("PSX-CD: READ CD packet failed at LBA %d (%d sectors): %s\n",
 			drive_lba, cnt, strerror(errno));
@@ -690,6 +809,9 @@ static void physical_cd_read_sectors_uncached(uint8_t *buffer, int lba, int cnt)
 		{
 			// Some USB optical bridges do not expose MMC packet commands through
 			// this ioctl. Preserve compatibility with the older one-sector path.
+			pthread_mutex_lock(&psx_stats_mutex);
+			psx_stats_fallback_sectors += chunk;
+			pthread_mutex_unlock(&psx_stats_mutex);
 			for (int i = 0; i < chunk; i++)
 				physical_cd_read_sector(buffer + i * CD_SECTOR_LEN, lba + i);
 		}
@@ -704,6 +826,7 @@ static void physical_cache_invalidate()
 {
 	pthread_mutex_lock(&physical_cache_mutex);
 	for (int i = 0; i < PHYSICAL_CACHE_SLOTS; i++) physical_cache[i].valid = 0;
+	physical_stream_lba = -1;
 	pthread_mutex_unlock(&physical_cache_mutex);
 }
 
@@ -724,15 +847,42 @@ static void *physical_cache_worker(void *)
 		while (!physical_cache_busy) pthread_cond_wait(&physical_cache_cond, &physical_cache_mutex);
 		int slot = physical_cache_request_slot;
 		int lba = physical_cache_request_lba;
+		int sectors = physical_cache_request_sectors;
+		int was_prefetch = physical_cache_request_prefetch;
 		pthread_mutex_unlock(&physical_cache_mutex);
 
-		physical_cd_read_sectors_uncached(physical_cache[slot].data, lba, PHYSICAL_CACHE_SECTORS);
+		int completed = 0;
+		int cancelled = 0;
+		while (completed < sectors)
+		{
+			int chunk = sectors - completed;
+			if (chunk > PHYSICAL_PACKET_SECTORS) chunk = PHYSICAL_PACKET_SECTORS;
+			physical_cd_read_sectors_uncached(physical_cache[slot].data + completed * CD_SECTOR_LEN,
+				lba + completed, chunk);
+			completed += chunk;
+
+			// A speculative 64-sector refill is four MMC transactions. If the
+			// core seeks while one is running, stop after the current transaction
+			// so the demand read isn't stuck behind the remaining packets.
+			if (was_prefetch && completed < sectors)
+			{
+				pthread_mutex_lock(&physical_cache_mutex);
+				cancelled = physical_cache_demand_waiting;
+				pthread_mutex_unlock(&physical_cache_mutex);
+				if (cancelled) break;
+			}
+		}
 
 		pthread_mutex_lock(&physical_cache_mutex);
-		physical_cache[slot].start_lba = lba;
-		physical_cache[slot].valid = physical_cd_enabled && physical_disc_present;
+		if (!cancelled)
+		{
+			physical_cache[slot].start_lba = lba;
+			physical_cache[slot].valid_sectors = sectors;
+			physical_cache[slot].valid = physical_cd_enabled && physical_disc_present;
+		}
 		physical_cache_busy = 0;
 		pthread_cond_broadcast(&physical_cache_cond);
+		if (was_prefetch && !cancelled && !physical_cache_demand_waiting) physical_cache_schedule_prefetch_locked();
 		pthread_mutex_unlock(&physical_cache_mutex);
 	}
 	return NULL;
@@ -758,51 +908,162 @@ static int physical_cache_find(int lba, int cnt)
 	for (int i = 0; i < PHYSICAL_CACHE_SLOTS; i++)
 	{
 		if (physical_cache[i].valid && lba >= physical_cache[i].start_lba &&
-			(lba + cnt) <= (physical_cache[i].start_lba + PHYSICAL_CACHE_SECTORS)) return i;
+			(lba + cnt) <= (physical_cache[i].start_lba + physical_cache[i].valid_sectors)) return i;
 	}
 	return -1;
 }
 
-static void physical_cache_queue(int slot, int lba)
+static int physical_cache_choose_demand_victim(int lba)
+{
+	for (int i = 0; i < PHYSICAL_CACHE_SLOTS; i++)
+		if (!physical_cache[i].valid) return i;
+
+	int victim = 0;
+	int victim_distance = -1;
+	for (int i = 0; i < PHYSICAL_CACHE_SLOTS; i++)
+	{
+		int start = physical_cache[i].start_lba;
+		int end = start + physical_cache[i].valid_sectors;
+		int distance = lba < start ? start - lba : (lba >= end ? lba - end + 1 : 0);
+		if (distance > victim_distance) {
+			victim = i;
+			victim_distance = distance;
+		}
+	}
+	return victim;
+}
+
+static void physical_cache_queue(int slot, int lba, int sectors, int prefetch)
 {
 	physical_cache[slot].valid = 0;
 	physical_cache_request_slot = slot;
 	physical_cache_request_lba = lba;
+	physical_cache_request_sectors = sectors;
+	physical_cache_request_prefetch = prefetch;
 	physical_cache_busy = 1;
 	pthread_cond_signal(&physical_cache_cond);
 }
 
+static int physical_cache_schedule_prefetch_locked()
+{
+	if (physical_cache_busy || physical_stream_lba < 0) return 0;
+	int slot = physical_cache_find(physical_stream_lba, 1);
+	if (slot < 0) return 0;
+	int connected[PHYSICAL_CACHE_SLOTS] = {};
+	connected[slot] = 1;
+	int next_lba = physical_cache[slot].start_lba + physical_cache[slot].valid_sectors;
+	int next_slot;
+	while ((next_slot = physical_cache_find(next_lba, 1)) >= 0)
+	{
+		connected[next_slot] = 1;
+		int end = physical_cache[next_slot].start_lba + physical_cache[next_slot].valid_sectors;
+		if (end <= next_lba) break;
+		next_lba = end;
+	}
+	if (next_lba >= toc.end) return 0;
+	int target = -1;
+	for (int i = 0; i < PHYSICAL_CACHE_SLOTS; i++)
+		if (!physical_cache[i].valid) { target = i; break; }
+	if (target < 0) {
+		for (int i = 0; i < PHYSICAL_CACHE_SLOTS; i++) {
+			if (connected[i]) continue;
+			if (target < 0 || physical_cache[i].start_lba < physical_cache[target].start_lba) target = i;
+		}
+	}
+	if (target < 0) return 0;
+	physical_cache_queue(target, next_lba, PHYSICAL_CACHE_SECTORS, 1);
+	return 1;
+}
+
 static void physical_cd_read_sectors(uint8_t *buffer, int lba, int cnt)
 {
+	pthread_mutex_lock(&psx_stats_mutex);
+	int sequential_request = psx_stats_last_read_end == lba;
+	psx_stats_read_calls++;
+	psx_stats_read_sectors += cnt;
+	if (sequential_request) psx_stats_sequential_reads++;
+	else psx_stats_random_reads++;
+	psx_stats_last_read_end = lba + cnt;
+	pthread_mutex_unlock(&psx_stats_mutex);
+
 	if (!physical_cache_thread_started)
 	{
 		physical_cd_read_sectors_uncached(buffer, lba, cnt);
 		return;
 	}
 
-	pthread_mutex_lock(&physical_cache_mutex);
-	int slot = physical_cache_find(lba, cnt);
-	while (slot < 0)
+	// A PSX request can straddle two adjacent cache slots. The old path required
+	// the entire request to fit in one slot, turning every boundary crossing into
+	// a blocking 64-sector refill. Copy each cached portion separately instead.
+	while (cnt > 0)
 	{
-		while (physical_cache_busy) pthread_cond_wait(&physical_cache_cond, &physical_cache_mutex);
-		slot = physical_cache_find(lba, cnt);
-		if (slot >= 0) break;
+		uint32_t wait_started = psx_stats_now_ms();
+		pthread_mutex_lock(&physical_cache_mutex);
+		if (sequential_request) physical_stream_lba = lba;
+		int slot = physical_cache_find(lba, 1);
+		int initial_hit = slot >= 0;
+		int trace_index = -1;
+		if (!initial_hit && psx_miss_trace_count < PSX_MISS_TRACE_MAX)
+		{
+			trace_index = psx_miss_trace_count++;
+			psx_miss_trace_t *e = &psx_miss_trace[trace_index];
+			memset(e, 0, sizeof(*e));
+			e->t = GetTimer(0);
+			e->lba = lba;
+			e->cnt = cnt;
+			e->sequential = sequential_request;
+			e->busy = physical_cache_busy;
+			e->worker_lba = physical_cache_request_lba;
+			e->worker_sectors = physical_cache_request_sectors;
+			e->worker_prefetch = physical_cache_request_prefetch;
+			e->stream_lba = physical_stream_lba;
+			for (int i = 0; i < PHYSICAL_CACHE_SLOTS; i++) {
+				e->valid[i] = physical_cache[i].valid;
+				e->start[i] = physical_cache[i].start_lba;
+				e->end[i] = physical_cache[i].start_lba + physical_cache[i].valid_sectors;
+			}
+		}
+		while (slot < 0)
+		{
+			slot = physical_cache_find(lba, 1);
+			if (slot >= 0) break;
+			if (physical_cache_busy) {
+				physical_cache_demand_waiting = 1;
+				pthread_cond_wait(&physical_cache_cond, &physical_cache_mutex);
+				continue;
+			}
 
-		int target = 0;
-		if (physical_cache[0].valid && !physical_cache[1].valid) target = 1;
-		else if (physical_cache[0].valid && physical_cache[1].valid)
-			target = physical_cache[0].start_lba <= physical_cache[1].start_lba ? 0 : 1;
-		physical_cache_queue(target, lba);
+			int target = physical_cache_choose_demand_victim(lba);
+			int fill = sequential_request ? PHYSICAL_CACHE_SECTORS : PHYSICAL_PACKET_SECTORS;
+			if (fill < cnt) fill = cnt < PHYSICAL_CACHE_SECTORS ? cnt : PHYSICAL_CACHE_SECTORS;
+			physical_cache_queue(target, lba, fill, 0);
+		}
+		physical_cache_demand_waiting = 0;
+
+		uint32_t waited = psx_stats_now_ms() - wait_started;
+		if (trace_index >= 0) psx_miss_trace[trace_index].wait_ms = waited;
+		pthread_mutex_lock(&psx_stats_mutex);
+		if (initial_hit) psx_stats_cache_hits++;
+		else {
+			psx_stats_cache_misses++;
+			psx_stats_cache_wait_ms += waited;
+			if (waited > psx_stats_cache_wait_max_ms) psx_stats_cache_wait_max_ms = waited;
+		}
+		pthread_mutex_unlock(&psx_stats_mutex);
+
+		int available = physical_cache[slot].start_lba + physical_cache[slot].valid_sectors - lba;
+		int chunk = cnt < available ? cnt : available;
+		memcpy(buffer, physical_cache[slot].data +
+			(lba - physical_cache[slot].start_lba) * CD_SECTOR_LEN,
+			chunk * CD_SECTOR_LEN);
+
+		if (sequential_request) physical_cache_schedule_prefetch_locked();
+		pthread_mutex_unlock(&physical_cache_mutex);
+
+		buffer += chunk * CD_SECTOR_LEN;
+		lba += chunk;
+		cnt -= chunk;
 	}
-
-	memcpy(buffer, physical_cache[slot].data + (lba - physical_cache[slot].start_lba) * CD_SECTOR_LEN,
-		cnt * CD_SECTOR_LEN);
-
-	// Fill the alternate slot before sequential playback reaches it.
-	int next_lba = physical_cache[slot].start_lba + PHYSICAL_CACHE_SECTORS;
-	int other = slot ^ 1;
-	if (!physical_cache_busy && !physical_cache_find(next_lba, 1)) physical_cache_queue(other, next_lba);
-	pthread_mutex_unlock(&physical_cache_mutex);
 }
 
 int psx_chd_hunksize()
@@ -1159,8 +1420,12 @@ static int physical_cd_mount_inserted_disc()
 
 	physical_disc_present = 1;
 	physical_cache_invalidate();
-	region_t region = region_t::UNKNOWN;
-	printf("PSX: Physical disc TOC loaded; region left on Auto\n");
+	game_info_t game_info = psx_get_game_info();
+	region_t region = psx_get_region();
+	if (region == region_t::UNKNOWN) region = game_info.region;
+	printf("PSX-CD: Physical disc TOC loaded; game ID: %s, detected region: %s\n",
+		game_info.game_id && game_info.game_id[0] ? game_info.game_id : "unknown",
+		region_string(region));
 	fflush(stdout);
 
 	// Original discs carry their protection data physically. The current PSX
@@ -1191,6 +1456,7 @@ void psx_use_physical_cd()
 	physical_disc_present = 0;
 	physical_cache_start();
 	physical_cache_invalidate();
+	psx_physical_stats_reset();
 
 	if (!physical_cd_open())
 	{
@@ -1221,6 +1487,7 @@ void psx_use_physical_cd()
 void psx_poll()
 {
 	spi_uio_cmd(UIO_CD_GET);
+	if (physical_cd_enabled) psx_physical_stats_poll();
 
 	if (physical_cd_enabled && (!physical_poll_timer || CheckTimer(physical_poll_timer)))
 	{

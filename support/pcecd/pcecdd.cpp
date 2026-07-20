@@ -3,14 +3,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
-#include <errno.h>
-#include <climits>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/ioctl.h>
-#include <linux/cdrom.h>
-#include <pthread.h>
-#include <sched.h>
 
 #include "../../file_io.h"
 #include "../../user_io.h"
@@ -25,185 +17,6 @@
 float get_cd_seek_ms(int start_sector, int target_sector);
 
 pcecdd_t pcecdd;
-
-#define PCE_PHYSICAL_DEVICE "/dev/sr0"
-#define PCE_PHYSICAL_SECTOR_SIZE 2352
-#define PCE_PHYSICAL_CACHE_SLOTS 2
-#define PCE_PHYSICAL_CACHE_SECTORS 16
-#define PCE_PHYSICAL_PACKET_SECTORS 16
-
-struct pce_physical_cache_t {
-	int start_lba;
-	int valid;
-	uint8_t data[PCE_PHYSICAL_CACHE_SECTORS * PCE_PHYSICAL_SECTOR_SIZE];
-};
-
-static int pce_physical_fd = -1;
-static toc_t *pce_physical_toc = NULL;
-static pce_physical_cache_t pce_physical_cache[PCE_PHYSICAL_CACHE_SLOTS] = {};
-static pthread_mutex_t pce_physical_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t pce_physical_cond = PTHREAD_COND_INITIALIZER;
-static pthread_t pce_physical_thread;
-static int pce_physical_thread_started = 0;
-static int pce_physical_busy = 0;
-static int pce_physical_request_slot = 0;
-static int pce_physical_request_lba = 0;
-
-static int pce_physical_open()
-{
-	if (pce_physical_fd >= 0) return 1;
-	pce_physical_fd = open(PCE_PHYSICAL_DEVICE, O_RDONLY | O_NONBLOCK);
-	if (pce_physical_fd < 0) {
-		printf("PCECD: cannot open %s: %s\n", PCE_PHYSICAL_DEVICE, strerror(errno));
-		return 0;
-	}
-	return 1;
-}
-
-int pcecdd_t::PhysicalDiscPresent()
-{
-	return pce_physical_open() && ioctl(pce_physical_fd, CDROM_DRIVE_STATUS, CDSL_CURRENT) == CDS_DISC_OK;
-}
-
-static int pce_physical_track_for_lba(int lba)
-{
-	if (!pce_physical_toc) return -1;
-	for (int i = 0; i < pce_physical_toc->last; i++)
-		if (lba >= (int)pce_physical_toc->tracks[i].start && lba < (int)pce_physical_toc->tracks[i].end) return i;
-	return -1;
-}
-
-static int pce_physical_read_packet(uint8_t *buffer, int lba, int count, int track)
-{
-	if (pce_physical_fd < 0 || count < 1 || track < 0) return 0;
-	struct cdrom_generic_command cgc = {};
-	struct request_sense sense = {};
-	cgc.cmd[0] = GPCMD_READ_CD;
-	cgc.cmd[2] = (lba >> 24) & 0xff;
-	cgc.cmd[3] = (lba >> 16) & 0xff;
-	cgc.cmd[4] = (lba >> 8) & 0xff;
-	cgc.cmd[5] = lba & 0xff;
-	cgc.cmd[6] = (count >> 16) & 0xff;
-	cgc.cmd[7] = (count >> 8) & 0xff;
-	cgc.cmd[8] = count & 0xff;
-	cgc.cmd[9] = pce_physical_toc->tracks[track].type == TT_CDDA ? 0x10 : 0xf8;
-	cgc.buffer = buffer;
-	cgc.buflen = count * PCE_PHYSICAL_SECTOR_SIZE;
-	cgc.sense = &sense;
-	cgc.data_direction = CGC_DATA_READ;
-	cgc.quiet = 1;
-	cgc.timeout = 3000;
-	return ioctl(pce_physical_fd, CDROM_SEND_PACKET, &cgc) >= 0;
-}
-
-static void pce_physical_read_uncached(uint8_t *buffer, int lba, int count)
-{
-	while (count > 0) {
-		int track = pce_physical_track_for_lba(lba);
-		if (track < 0) {
-			memset(buffer, 0, PCE_PHYSICAL_SECTOR_SIZE);
-			buffer += PCE_PHYSICAL_SECTOR_SIZE;
-			lba++;
-			count--;
-			continue;
-		}
-		int chunk = count;
-		int remaining = pce_physical_toc->tracks[track].end - lba;
-		if (chunk > remaining) chunk = remaining;
-		if (chunk > PCE_PHYSICAL_PACKET_SECTORS) chunk = PCE_PHYSICAL_PACKET_SECTORS;
-		if (!pce_physical_read_packet(buffer, lba, chunk, track)) {
-			printf("PCECD: READ CD failed at LBA %d (%d sectors): %s\n", lba, chunk, strerror(errno));
-			memset(buffer, 0, chunk * PCE_PHYSICAL_SECTOR_SIZE);
-		}
-		buffer += chunk * PCE_PHYSICAL_SECTOR_SIZE;
-		lba += chunk;
-		count -= chunk;
-	}
-}
-
-static void pce_physical_cache_invalidate()
-{
-	pthread_mutex_lock(&pce_physical_mutex);
-	while (pce_physical_busy) pthread_cond_wait(&pce_physical_cond, &pce_physical_mutex);
-	for (int i = 0; i < PCE_PHYSICAL_CACHE_SLOTS; i++) pce_physical_cache[i].valid = 0;
-	pthread_mutex_unlock(&pce_physical_mutex);
-}
-
-static void *pce_physical_worker(void *)
-{
-	cpu_set_t cpus;
-	CPU_ZERO(&cpus);
-	CPU_SET(0, &cpus);
-	CPU_SET(1, &cpus);
-	pthread_setaffinity_np(pthread_self(), sizeof(cpus), &cpus);
-	while (1) {
-		pthread_mutex_lock(&pce_physical_mutex);
-		while (!pce_physical_busy) pthread_cond_wait(&pce_physical_cond, &pce_physical_mutex);
-		int slot = pce_physical_request_slot;
-		int lba = pce_physical_request_lba;
-		pthread_mutex_unlock(&pce_physical_mutex);
-		pce_physical_read_uncached(pce_physical_cache[slot].data, lba, PCE_PHYSICAL_CACHE_SECTORS);
-		pthread_mutex_lock(&pce_physical_mutex);
-		pce_physical_cache[slot].start_lba = lba;
-		pce_physical_cache[slot].valid = pce_physical_toc && pcecdd.IsPhysical();
-		pce_physical_busy = 0;
-		pthread_cond_broadcast(&pce_physical_cond);
-		pthread_mutex_unlock(&pce_physical_mutex);
-	}
-	return NULL;
-}
-
-static void pce_physical_cache_start()
-{
-	if (pce_physical_thread_started) return;
-	if (!pthread_create(&pce_physical_thread, NULL, pce_physical_worker, NULL)) {
-		pce_physical_thread_started = 1;
-		printf("PCECD: asynchronous read-ahead enabled (%d x %d sectors)\n", PCE_PHYSICAL_CACHE_SLOTS, PCE_PHYSICAL_CACHE_SECTORS);
-	}
-}
-
-static int pce_physical_cache_find(int lba, int count)
-{
-	for (int i = 0; i < PCE_PHYSICAL_CACHE_SLOTS; i++)
-		if (pce_physical_cache[i].valid && lba >= pce_physical_cache[i].start_lba &&
-			(lba + count) <= (pce_physical_cache[i].start_lba + PCE_PHYSICAL_CACHE_SECTORS)) return i;
-	return -1;
-}
-
-static void pce_physical_cache_queue(int slot, int lba)
-{
-	pce_physical_cache[slot].valid = 0;
-	pce_physical_request_slot = slot;
-	pce_physical_request_lba = lba;
-	pce_physical_busy = 1;
-	pthread_cond_signal(&pce_physical_cond);
-}
-
-static void pce_physical_read(uint8_t *buffer, int lba, int count)
-{
-	if (!pce_physical_thread_started) {
-		pce_physical_read_uncached(buffer, lba, count);
-		return;
-	}
-	pthread_mutex_lock(&pce_physical_mutex);
-	int slot = pce_physical_cache_find(lba, count);
-	while (slot < 0) {
-		while (pce_physical_busy) pthread_cond_wait(&pce_physical_cond, &pce_physical_mutex);
-		slot = pce_physical_cache_find(lba, count);
-		if (slot >= 0) break;
-		int target = (!pce_physical_cache[1].valid ||
-			(pce_physical_cache[0].valid && pce_physical_cache[0].start_lba <= pce_physical_cache[1].start_lba)) ? 1 : 0;
-		pce_physical_cache_queue(target, lba);
-	}
-	memcpy(buffer, pce_physical_cache[slot].data +
-		(lba - pce_physical_cache[slot].start_lba) * PCE_PHYSICAL_SECTOR_SIZE,
-		count * PCE_PHYSICAL_SECTOR_SIZE);
-	int next_lba = pce_physical_cache[slot].start_lba + PCE_PHYSICAL_CACHE_SECTORS;
-	if (pce_physical_toc && next_lba < (int)pce_physical_toc->end &&
-		!pce_physical_busy && !pce_physical_cache_find(next_lba, 1))
-		pce_physical_cache_queue(slot ^ 1, next_lba);
-	pthread_mutex_unlock(&pce_physical_mutex);
-}
 
 pcecdd_t::pcecdd_t() {
 	latency = 0;
@@ -225,7 +38,6 @@ pcecdd_t::pcecdd_t() {
 	CDDAMode = PCECD_CDDAMODE_SILENT;
 	region = 0;
 	subcode_file = NULL;
-	physical = 0;
 
 	stat = 0x0000;
 
@@ -487,50 +299,8 @@ int pcecdd_t::Load(const char *filename)
 	return 0;
 }
 
-int pcecdd_t::LoadPhysical()
-{
-	Unload();
-	if (!PhysicalDiscPresent()) return 0;
-	struct cdrom_tochdr header = {};
-	if (ioctl(pce_physical_fd, CDROMREADTOCHDR, &header) < 0) return 0;
-	int count = header.cdth_trk1 - header.cdth_trk0 + 1;
-	if (count < 1 || count > 99) return 0;
-	struct cdrom_tocentry entries[100] = {};
-	for (int i = 0; i < count; i++) {
-		entries[i].cdte_track = header.cdth_trk0 + i;
-		entries[i].cdte_format = CDROM_LBA;
-		if (ioctl(pce_physical_fd, CDROMREADTOCENTRY, &entries[i]) < 0) return 0;
-	}
-	entries[count].cdte_track = CDROM_LEADOUT;
-	entries[count].cdte_format = CDROM_LBA;
-	if (ioctl(pce_physical_fd, CDROMREADTOCENTRY, &entries[count]) < 0) return 0;
-	for (int i = 0; i < count; i++) {
-		this->toc.tracks[i].start = entries[i].cdte_addr.lba;
-		this->toc.tracks[i].end = entries[i + 1].cdte_addr.lba;
-		this->toc.tracks[i].sector_size = PCE_PHYSICAL_SECTOR_SIZE;
-		this->toc.tracks[i].type = (entries[i].cdte_ctrl & CDROM_DATA_TRACK) ? TT_MODE1 : TT_CDDA;
-		printf("PCECD: physical track %d start=%u end=%u type=%s\n", i + 1,
-			this->toc.tracks[i].start, this->toc.tracks[i].end,
-			this->toc.tracks[i].type ? "data" : "audio");
-	}
-	this->toc.last = count;
-	this->toc.end = entries[count].cdte_addr.lba;
-	this->toc.tracks[count].start = this->toc.end;
-	this->physical = 1;
-	this->loaded = 1;
-	pce_physical_toc = &this->toc;
-	pce_physical_cache_start();
-	pce_physical_cache_invalidate();
-	ioctl(pce_physical_fd, CDROM_SELECT_SPEED, 0);
-	return 1;
-}
-
-int pcecdd_t::IsPhysical() const { return physical; }
-
 void pcecdd_t::Unload()
 {
-	pce_physical_cache_invalidate();
-	pce_physical_toc = NULL;
 	if (this->loaded)
 	{
 		if (this->toc.chd_f)
@@ -559,7 +329,6 @@ void pcecdd_t::Unload()
 	}
 
 	memset(&this->toc, 0x00, sizeof(this->toc));
-	this->physical = 0;
 }
 
 void pcecdd_t::Reset() {
@@ -667,7 +436,7 @@ void pcecdd_t::Update() {
 
 			this->isData = 0x01;
 
-			if (!this->physical && this->toc.tracks[this->index].f.opened())
+			if (this->toc.tracks[this->index].f.opened())
 			{
 				FileSeek(&this->toc.tracks[this->index].f, (this->toc.tracks[this->index].start * 2352) - this->toc.tracks[this->index].offset, SEEK_SET);
 			}
@@ -695,7 +464,7 @@ void pcecdd_t::Update() {
 		{
 			if (!this->toc.tracks[this->index].type)
 			{
-				if (!this->physical && this->toc.tracks[this->index].f.opened()) 
+				if (this->toc.tracks[this->index].f.opened()) 
 				{
 					FileSeek(&this->toc.tracks[index].f, (this->lba * 2352) - this->toc.tracks[index].offset, SEEK_SET);
 				}
@@ -911,7 +680,7 @@ void pcecdd_t::CommandExec() {
 		this->lba = new_lba;
 		this->cnt = cnt_;
 
-		if (!this->physical && this->toc.tracks[index].f.opened())
+		if (this->toc.tracks[index].f.opened())
 		{
 			int offset = (new_lba * this->toc.tracks[index].sector_size) - this->toc.tracks[index].offset;
 			FileSeek(&this->toc.tracks[index].f, offset, SEEK_SET);
@@ -1140,13 +909,6 @@ void pcecdd_t::ReadData(uint8_t *buf)
 {
 	if (this->toc.tracks[this->index].type && (this->lba >= 0))
 	{
-		if (this->physical)
-		{
-			uint8_t raw[PCE_PHYSICAL_SECTOR_SIZE];
-			pce_physical_read(raw, this->lba, 1);
-			memcpy(buf, raw + 16, 2048);
-			return;
-		}
 		if (this->toc.chd_f)
 		{
 			int s_offset = 0;
@@ -1174,11 +936,7 @@ int pcecdd_t::ReadCDDA(uint8_t *buf)
 	this->audioOffset = 0;// 2352;
 
 
-	if (this->physical)
-	{
-		pce_physical_read(buf, this->lba, 1);
-	}
-	else if (this->toc.chd_f)
+	if (this->toc.chd_f)
 	{
 		mister_chd_read_sector(this->toc.chd_f, this->lba + this->toc.tracks[this->index].offset, 0, 0, this->audioLength, buf, this->chd_hunkbuf, &this->chd_hunknum);
 		for (int swapidx = 0; swapidx < this->audioLength; swapidx += 2)
@@ -1284,5 +1042,7 @@ void pcecdd_t::CommandError(uint8_t key, uint8_t asc, uint8_t ascq, uint8_t fru)
 	sense.ascq = ascq;
 	sense.fru = fru;
 }
+
+
 
 

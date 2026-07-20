@@ -50,6 +50,9 @@ public:
 
 	satcdd_t();
 	int Load(const char *filename);
+	int LoadPhysical();
+	int IsPhysical() const;
+	static int PhysicalDiscPresent();
 	void Unload();
 	void Reset();
 	void Process(uint8_t* time_mode);
@@ -89,6 +92,7 @@ private:
 	int chd_hunknum;
 	uint8_t *chd_hunkbuf;
 	int chd_audio_read_lba;
+	bool physical;
 
 
 	int LoadCUE(const char* filename);
@@ -117,6 +121,7 @@ extern uint32_t saturn_frame_cnt;
 
 void saturn_poll();
 void saturn_set_image(int num, const char *filename);
+void saturn_use_physical_cd();
 void saturn_reset();
 void saturn_fill_blanksave(uint8_t *buffer, uint32_t lba);
 int saturn_send_data(uint8_t* buf, int len, uint8_t index);

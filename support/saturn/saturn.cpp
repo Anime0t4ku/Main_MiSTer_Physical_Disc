@@ -12,6 +12,9 @@
 #include "saturn.h"
 
 static int need_reset = 0;
+static int saturn_physical_enabled = 0;
+static int saturn_physical_present = 0;
+static uint32_t saturn_physical_poll_timer = 0;
 uint32_t saturn_frame_cnt = 0;
 uint8_t time_mode;
 
@@ -44,6 +47,33 @@ void saturn_poll()
 {
 	static unsigned long poll_timer = 0;
 	static uint8_t last_req = 255;
+
+	// CD-Saturn is an MGL override name. It lets the unmodified official RBF
+	// enter physical-disc mode without spending any additional FPGA resources.
+	if (!saturn_physical_enabled && !strcasecmp(user_io_get_core_name(), "CD-Saturn"))
+		saturn_use_physical_cd();
+
+	if (saturn_physical_enabled && (!saturn_physical_poll_timer || CheckTimer(saturn_physical_poll_timer))) {
+		saturn_physical_poll_timer = GetTimer(500);
+		int present = satcdd_t::PhysicalDiscPresent();
+		if (present != saturn_physical_present) {
+			saturn_physical_present = present;
+			satcdd.Unload();
+			satcdd.Reset();
+			if (present && satcdd.LoadPhysical()) {
+				satcdd.SendData = saturn_send_data;
+				uint8_t header[256] = {};
+				if (satcdd.GetBootHeader(header) > 0) {
+					saturn_send_data(header, sizeof(header), BOOT_IO_INDEX);
+					printf("SAT-CD: product %.10s region %c\n", header + 0x20, header[0x40]);
+				}
+				saturn_reset();
+				Info("Physical Saturn disc mounted", 2000);
+			} else if (!present) {
+				Info("Physical Saturn disc removed", 2000);
+			}
+		}
+	}
 
 	if (!poll_timer || CheckTimer(poll_timer))
 	{
@@ -158,6 +188,7 @@ void saturn_set_image(int num, const char *filename)
 	static char last_dir[1024] = {};
 
 	(void)num;
+	saturn_physical_enabled = 0;
 
 	int reset_after_insert_disc = !user_io_status_get("[4]");
 
@@ -233,6 +264,37 @@ void saturn_set_image(int num, const char *filename)
 	}
 
 	user_io_status_set("[0]", 0);
+}
+
+void saturn_use_physical_cd()
+{
+	printf("SAT-CD: Use Physical Disc selected\n");
+	// Saturn's FPGA already derives its area code from byte 0x40 of the boot
+	// header when the Region menu is set to Auto.
+	user_io_status_set("[35:33]", 7);
+	saturn_physical_enabled = 1;
+	saturn_physical_poll_timer = 0;
+	saturn_physical_present = satcdd_t::PhysicalDiscPresent();
+	satcdd.Unload();
+	satcdd.Reset();
+
+	char bios[1024];
+	sprintf(bios, "%s/boot.rom", HomeDir());
+	if (!user_io_file_tx(bios)) Info("CD BIOS not found!", 4000);
+
+	if (!saturn_physical_present || !satcdd.LoadPhysical()) {
+		Info("Physical CD mode enabled - insert a disc", 3000);
+		return;
+	}
+
+	satcdd.SendData = saturn_send_data;
+	uint8_t header[256] = {};
+	if (satcdd.GetBootHeader(header) > 0) {
+		saturn_send_data(header, sizeof(header), BOOT_IO_INDEX);
+		printf("SAT-CD: product %.10s region %c\n", header + 0x20, header[0x40]);
+	}
+	saturn_reset();
+	Info("Physical Saturn disc mounted", 2000);
 }
 
 void saturn_reset() {
