@@ -31,9 +31,11 @@ pcecdd_t pcecdd;
 #define PCE_PHYSICAL_CACHE_SLOTS 2
 #define PCE_PHYSICAL_CACHE_SECTORS 16
 #define PCE_PHYSICAL_PACKET_SECTORS 16
+#define PCE_PHYSICAL_PREFETCH_CHUNK 1
 
 struct pce_physical_cache_t {
 	int start_lba;
+	int valid_sectors;
 	int valid;
 	uint8_t data[PCE_PHYSICAL_CACHE_SECTORS * PCE_PHYSICAL_SECTOR_SIZE];
 };
@@ -48,6 +50,9 @@ static int pce_physical_thread_started = 0;
 static int pce_physical_busy = 0;
 static int pce_physical_request_slot = 0;
 static int pce_physical_request_lba = 0;
+static int pce_physical_request_sectors = PCE_PHYSICAL_CACHE_SECTORS;
+static int pce_physical_request_prefetch = 0;
+static int pce_physical_demand_waiting = 0;
 
 static int pce_physical_open()
 {
@@ -141,10 +146,27 @@ static void *pce_physical_worker(void *)
 		while (!pce_physical_busy) pthread_cond_wait(&pce_physical_cond, &pce_physical_mutex);
 		int slot = pce_physical_request_slot;
 		int lba = pce_physical_request_lba;
+		int sectors = pce_physical_request_sectors;
+		int prefetch = pce_physical_request_prefetch;
 		pthread_mutex_unlock(&pce_physical_mutex);
-		pce_physical_read_uncached(pce_physical_cache[slot].data, lba, PCE_PHYSICAL_CACHE_SECTORS);
+		int completed = 0;
+		while (completed < sectors) {
+			int chunk = sectors - completed;
+			if (prefetch && chunk > PCE_PHYSICAL_PREFETCH_CHUNK)
+				chunk = PCE_PHYSICAL_PREFETCH_CHUNK;
+			pce_physical_read_uncached(pce_physical_cache[slot].data +
+				completed * PCE_PHYSICAL_SECTOR_SIZE, lba + completed, chunk);
+			completed += chunk;
+			if (prefetch && completed < sectors) {
+				pthread_mutex_lock(&pce_physical_mutex);
+				int yield_to_demand = pce_physical_demand_waiting;
+				pthread_mutex_unlock(&pce_physical_mutex);
+				if (yield_to_demand) break;
+			}
+		}
 		pthread_mutex_lock(&pce_physical_mutex);
 		pce_physical_cache[slot].start_lba = lba;
+		pce_physical_cache[slot].valid_sectors = completed;
 		pce_physical_cache[slot].valid = pce_physical_toc && pcecdd.IsPhysical();
 		pce_physical_busy = 0;
 		pthread_cond_broadcast(&pce_physical_cond);
@@ -158,7 +180,8 @@ static void pce_physical_cache_start()
 	if (pce_physical_thread_started) return;
 	if (!pthread_create(&pce_physical_thread, NULL, pce_physical_worker, NULL)) {
 		pce_physical_thread_started = 1;
-		printf("PCECD: asynchronous read-ahead enabled (%d x %d sectors)\n", PCE_PHYSICAL_CACHE_SLOTS, PCE_PHYSICAL_CACHE_SECTORS);
+		printf("PCECD: v0.50 asynchronous read-ahead enabled (%d x %d sectors)\n",
+			PCE_PHYSICAL_CACHE_SLOTS, PCE_PHYSICAL_CACHE_SECTORS);
 	}
 }
 
@@ -166,15 +189,19 @@ static int pce_physical_cache_find(int lba, int count)
 {
 	for (int i = 0; i < PCE_PHYSICAL_CACHE_SLOTS; i++)
 		if (pce_physical_cache[i].valid && lba >= pce_physical_cache[i].start_lba &&
-			(lba + count) <= (pce_physical_cache[i].start_lba + PCE_PHYSICAL_CACHE_SECTORS)) return i;
+			(lba + count) <= (pce_physical_cache[i].start_lba + pce_physical_cache[i].valid_sectors)) return i;
 	return -1;
 }
 
-static void pce_physical_cache_queue(int slot, int lba)
+static void pce_physical_cache_queue(int slot, int lba, int sectors, int prefetch)
 {
+	if (sectors < 1) sectors = 1;
+	if (sectors > PCE_PHYSICAL_CACHE_SECTORS) sectors = PCE_PHYSICAL_CACHE_SECTORS;
 	pce_physical_cache[slot].valid = 0;
 	pce_physical_request_slot = slot;
 	pce_physical_request_lba = lba;
+	pce_physical_request_sectors = sectors;
+	pce_physical_request_prefetch = prefetch;
 	pce_physical_busy = 1;
 	pthread_cond_signal(&pce_physical_cond);
 }
@@ -188,20 +215,26 @@ static void pce_physical_read(uint8_t *buffer, int lba, int count)
 	pthread_mutex_lock(&pce_physical_mutex);
 	int slot = pce_physical_cache_find(lba, count);
 	while (slot < 0) {
-		while (pce_physical_busy) pthread_cond_wait(&pce_physical_cond, &pce_physical_mutex);
+		while (pce_physical_busy) {
+			pce_physical_demand_waiting = 1;
+			pthread_cond_wait(&pce_physical_cond, &pce_physical_mutex);
+		}
+		pce_physical_demand_waiting = 0;
 		slot = pce_physical_cache_find(lba, count);
 		if (slot >= 0) break;
 		int target = (!pce_physical_cache[1].valid ||
 			(pce_physical_cache[0].valid && pce_physical_cache[0].start_lba <= pce_physical_cache[1].start_lba)) ? 1 : 0;
-		pce_physical_cache_queue(target, lba);
+		// A cold seek should block only for the sectors the core actually needs.
+		// The following full 16-sector window is fetched asynchronously below.
+		pce_physical_cache_queue(target, lba, count, 0);
 	}
 	memcpy(buffer, pce_physical_cache[slot].data +
 		(lba - pce_physical_cache[slot].start_lba) * PCE_PHYSICAL_SECTOR_SIZE,
 		count * PCE_PHYSICAL_SECTOR_SIZE);
-	int next_lba = pce_physical_cache[slot].start_lba + PCE_PHYSICAL_CACHE_SECTORS;
+	int next_lba = pce_physical_cache[slot].start_lba + pce_physical_cache[slot].valid_sectors;
 	if (pce_physical_toc && next_lba < (int)pce_physical_toc->end &&
 		!pce_physical_busy && !pce_physical_cache_find(next_lba, 1))
-		pce_physical_cache_queue(slot ^ 1, next_lba);
+		pce_physical_cache_queue(slot ^ 1, next_lba, PCE_PHYSICAL_CACHE_SECTORS, 1);
 	pthread_mutex_unlock(&pce_physical_mutex);
 }
 
@@ -1284,4 +1317,3 @@ void pcecdd_t::CommandError(uint8_t key, uint8_t asc, uint8_t ascq, uint8_t fru)
 	sense.ascq = ascq;
 	sense.fru = fru;
 }
-
