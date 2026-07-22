@@ -92,15 +92,21 @@ $(BUILDDIR)/%.png.o: %.png
 ifneq ($(MAKECMDGOALS), clean)
 -include $(DEP)
 endif
+# NB: the -MT for the object must carry the $(BUILDDIR)/ prefix. upstream
+# wrote `-MT $*.c.o`, which declares header deps for a target that nothing
+# builds - so .o files were NEVER rebuilt on header changes, and a struct
+# edit in cfg.h produced a binary half-compiled against the old layout
+# (fb_size read from bootcore_timeout's low byte -> 480x270 framebuffer,
+# fb_terminal read as 0 -> pure black menu).
 $(BUILDDIR)/%.c.d: %.c
 	@mkdir -p $(dir $(BUILDDIR)/$*)
 	$(Q)$(info $< >> $@)
-	$(Q)$(CC) $(DFLAGS) -MM $< -MT $@ -MT $*.c.o -MF $@ 2>&1 | $(OUTPUT_FILTER)
+	$(Q)$(CC) $(DFLAGS) -MM $< -MT $@ -MT $(BUILDDIR)/$*.c.o -MF $@ 2>&1 | $(OUTPUT_FILTER)
 
 $(BUILDDIR)/%.cpp.d: %.cpp
 	@mkdir -p $(dir $(BUILDDIR)/$*)
 	$(Q)$(info $< >> $@)
-	$(Q)$(CC) $(DFLAGS) -MM $< -MT $@ -MT $*.cpp.o -MF $@ 2>&1 | $(OUTPUT_FILTER)
+	$(Q)$(CC) $(DFLAGS) -MM $< -MT $@ -MT $(BUILDDIR)/$*.cpp.o -MF $@ 2>&1 | $(OUTPUT_FILTER)
 
 # Ensure correct time stamp
 $(BUILDDIR)/main.cpp.o: $(filter-out $(BUILDDIR)/main.cpp.o, $(OBJ))

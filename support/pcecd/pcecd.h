@@ -1,7 +1,7 @@
 #ifndef PCECD_H
 #define PCECD_H
 
-// CDD command
+
 #define PCECD_COMM_TESTUNIT			0x00
 #define PCECD_COMM_REQUESTSENSE		0x03
 #define PCECD_COMM_READ6			0x08
@@ -77,9 +77,6 @@ public:
 
 	pcecdd_t();
 	int Load(const char *filename);
-	int LoadPhysical();
-	int IsPhysical() const;
-	static int PhysicalDiscPresent();
 	void Unload();
 	void Reset();
 	void Update();
@@ -109,7 +106,6 @@ private:
 	uint8_t region;
 	uint8_t *chd_hunkbuf;
 	int chd_hunknum;
-	int physical;
 
 	uint16_t stat;
 	uint8_t comm[14];
@@ -136,7 +132,7 @@ private:
 
 #define CD_SCAN_SPEED 30
 
-//pcecdd.cpp
+
 extern pcecdd_t pcecdd;
 
 
@@ -145,7 +141,6 @@ void pcecd_set_image(int num, const char *filename);
 int pcecd_send_data(uint8_t* buf, int len, uint8_t index);
 void pcecd_reset();
 int pcecd_using_cd();
-void pcecd_use_physical_cd();
 
 #define PCECD_DIR "TGFX16-CD"
 

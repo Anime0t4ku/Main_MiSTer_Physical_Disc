@@ -8,6 +8,7 @@
 #include "../../file_io.h"
 #include "../../cd.h"
 #include "mister_chd.h"
+#include "../physical_disc/physical_disc_acoustic.h"
 
 void lba_to_hunkinfo(chd_file *chd_f, int lba, int *hunknumber, int *hunkoffset)
 {
@@ -39,22 +40,22 @@ chd_error mister_load_chd(const char *filename, toc_t *cd_toc)
 		return err;
 	}
 
-	//TODO: deal with non v5 chd versions
+	
 	const chd_header *chd_header = chd_get_header(cd_toc->chd_f);
 	if (!chd_header)
 	{
 		chd_close(cd_toc->chd_f);
-		return CHDERR_NO_INTERFACE; //I'm not sure this error condition is possible, so just use whatever
+		return CHDERR_NO_INTERFACE; 
 	}
 
 	mister_chd_log("hunkbytes %d unitbytes %d logical length %llu\n", chd_header->hunkbytes, chd_header->unitbytes, chd_header->logicalbytes);
 	cd_toc->chd_hunksize = chd_header->hunkbytes;
 
-	//Set CLOEXEC on underlying FD
+	
 	int chd_fd = fileno((FILE *)chd_core_file(cd_toc->chd_f)->argp);
 	if (chd_fd) fcntl(chd_fd, F_SETFD, FD_CLOEXEC);
 
-	//Load track info
+	
 	int sector_cnt = 0;
 	for (cd_toc->last = 0; cd_toc->last < 99; cd_toc->last++)
 	{
@@ -70,7 +71,7 @@ chd_error mister_load_chd(const char *filename, toc_t *cd_toc)
 			if (sscanf(tmp, CDROM_TRACK_METADATA_FORMAT, &track_id, track_type, subtype, &frames) != 4) break;
 		}
 		else {
-			//No more tracks
+			
 			break;
 		}
 
@@ -111,7 +112,7 @@ chd_error mister_load_chd(const char *filename, toc_t *cd_toc)
 
 		if (!pregap_valid)
 		{
-			//Pregap sectors are NOT included in the CHD for this track
+			
 			pregap = 0;
 		}
 
@@ -149,7 +150,7 @@ chd_error mister_load_chd(const char *filename, toc_t *cd_toc)
 			cd_toc->tracks[cd_toc->last].sbc_type = SUBCODE_RW_RAW;
 		}
 
-		//CHD pads tracks to a multiple of 4 sectors, keep track of the overall sector count and calculate the difference between the cdrom lba and the effective chd lba
+		
 		cd_toc->tracks[cd_toc->last].offset = (sector_cnt + pregap - cd_toc->tracks[cd_toc->last].start);
 		cd_toc->tracks[cd_toc->last].end = cd_toc->tracks[cd_toc->last].start + frames - pregap;
 		cd_toc->end = cd_toc->tracks[cd_toc->last].end + postgap;
@@ -162,6 +163,9 @@ chd_error mister_load_chd(const char *filename, toc_t *cd_toc)
 
 chd_error mister_chd_read_sector(chd_file *chd_f, int lba, uint32_t d_offset, uint32_t s_offset, int length, uint8_t *destbuf, uint8_t *hunkbuf, int *hunknum)
 {
+	
+	
+	physical_disc_acoustic_hint(lba);
 
 	int tmphnum = 0;
 	int hunkofs = 0;
@@ -169,7 +173,7 @@ chd_error mister_chd_read_sector(chd_file *chd_f, int lba, uint32_t d_offset, ui
 	lba_to_hunkinfo(chd_f, lba, &tmphnum, &hunkofs);
 
 
-	//mister_chd_log("READ LBA: %d, dest_offset: %d sector offset: %d length %d chd_f %p\n", lba, d_offset, s_offset, length, chd_f);
+	
 	if (tmphnum != *hunknum)
 	{
 		chd_error err = chd_read(chd_f, tmphnum, hunkbuf);

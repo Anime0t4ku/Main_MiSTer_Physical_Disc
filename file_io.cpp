@@ -45,14 +45,14 @@ DirentVector DirItem;
 DirNameSet DirNames;
 
 
-// Directory scanning can cause the same zip file to be opened multiple times
-// due to testing file types to adjust the path
-// (and the fact the code path is shared with regular files)
-// cache the opened mz_zip_archive so we only open it once
-// this has the extra benefit that if a user is navigating through multiple directories
-// in a zip archive, the zip will only be opened once and things will be more responsive
-// ** We have to open the file outselves with open() so we can set O_CLOEXEC to prevent
-// leaking the file descriptor when the user changes cores
+
+
+
+
+
+
+
+
 
 static mz_zip_archive last_zip_archive = {};
 static int last_zip_fd = -1;
@@ -61,7 +61,7 @@ static char last_zip_fname[256] = {};
 static char scanned_path[1024] = {};
 static int scanned_opts = 0;
 
-static int iSelectedEntry = 0;       // selected entry index
+static int iSelectedEntry = 0;       
 static int iFirstEntry = 0;
 
 static char full_path[2100];
@@ -234,14 +234,14 @@ static int isPathDirectory(const char *path, int use_zip = 1)
 			return 0;
 		}
 
-		// Folder names always end with a slash in the zip
-		// file central directory.
+		
+		
 		strcat(file_path, "/");
 
-		// Some zip files don't have directory entries
-		// Use the locate_file call to try and find the directory entry first, since
-		// this is a binary search (usually) If that fails then scan for the first
-		// entry that starts with file_path
+		
+		
+		
+		
 
 		const int file_index = mz_zip_reader_locate_file(&last_zip_archive, file_path, NULL, 0);
 		if (file_index >= 0 && mz_zip_reader_is_file_a_directory(&last_zip_archive, file_index))
@@ -265,7 +265,7 @@ static int isPathDirectory(const char *path, int use_zip = 1)
 		int stmode = get_stmode(full_path);
 		if (!stmode)
 		{
-			//printf("isPathDirectory(stat) path: %s, error: %s.\n", full_path, strerror(errno));
+			
 			return 0;
 		}
 
@@ -282,23 +282,23 @@ static int isPathRegularFile(const char *path, int use_zip = 1)
 	char *zip_path, *file_path;
 	if (use_zip && FileIsZipped(full_path, &zip_path, &file_path))
 	{
-		//If there's no path into the zip file, don't bother opening it, we're a "directory"
+		
 		if (!*file_path)
 		{
 			return 0;
 		}
 		if (!OpenZipfileCached(full_path, 0))
 		{
-			//printf("isPathRegularFile(mz_zip_reader_init_file) Zip:%s, error:%s\n", zip_path,
-			//       mz_zip_get_error_string(mz_zip_get_last_error(&z)));
+			
+			
 			return 0;
 		}
 		const int file_index = mz_zip_reader_locate_file(&last_zip_archive, file_path, NULL, 0);
 		if (file_index < 0)
 		{
-			//printf("isPathRegularFile(mz_zip_reader_locate_file) Zip:%s, file:%s, error: %s\n",
-			//		 zip_path, file_path,
-			//		 mz_zip_get_error_string(mz_zip_get_last_error(&z)));
+			
+			
+			
 			return 0;
 		}
 
@@ -330,7 +330,7 @@ void FileClose(fileTYPE *file)
 
 	if (file->filp)
 	{
-		//printf("closing %p\n", file->filp);
+		
 		fclose(file->filp);
 		if (file->type == 1)
 		{
@@ -538,7 +538,7 @@ int FileOpenEx(fileTYPE *file, const char *name, int mode, char mute, int use_zi
 			}
 
 			file->size = st.st_size;
-			if (st.st_rdev && !st.st_size)  //for special files we need an ioctl call to get the correct size
+			if (st.st_rdev && !st.st_size)  
 			{
 				unsigned long long blksize;
 				int ret = ioctl(fd, BLKGETSIZE64, &blksize);
@@ -556,7 +556,7 @@ int FileOpenEx(fileTYPE *file, const char *name, int mode, char mute, int use_zi
 		}
 	}
 
-	//printf("opened %s, size %llu\n", full_path, file->size);
+	
 	return 1;
 }
 
@@ -567,7 +567,7 @@ __off64_t FileGetSize(fileTYPE *file)
 		struct stat64 st;
 		if (fstat64(fileno(file->filp), &st) < 0) return 0;
 
-		if (st.st_rdev && !st.st_size)  //for special files we need an ioctl call to get the correct size
+		if (st.st_rdev && !st.st_size)  
 		{
 			unsigned long long blksize;
 			int ret = ioctl(fileno(file->filp), BLKGETSIZE64, &blksize);
@@ -657,7 +657,7 @@ int FileSeekLBA(fileTYPE *file, uint32_t offset)
 	return FileSeek(file, off64, SEEK_SET);
 }
 
-// Read with offset advancing
+
 int FileReadAdv(fileTYPE *file, void *pBuffer, int length, int failres)
 {
 	ssize_t ret = 0;
@@ -697,7 +697,7 @@ int FileReadSec(fileTYPE *file, void *pBuffer)
 	return FileReadAdv(file, pBuffer, 512);
 }
 
-// Write with offset advancing
+
 int FileWriteAdv(fileTYPE *file, void *pBuffer, int length, int failres)
 {
 	int ret;
@@ -859,7 +859,7 @@ int FileCanWrite(const char *name)
 		return 0;
 	}
 
-	//printf("FileCanWrite: mode=%04o.\n", st.st_mode);
+	
 	return ((st.st_mode & S_IWUSR) != 0);
 }
 
@@ -884,7 +884,7 @@ int FileCreatePath(const char *dir)
 
 void FileGenerateScreenshotName(const char *name, char *out_name, const char* extension, int buflen)
 {
-	// If the name ends with target extension then don't modify it
+	
 	       
 	size_t name_len = strlen(name);
 	size_t ext_len = strlen(extension);
@@ -908,7 +908,7 @@ void FileGenerateScreenshotName(const char *name, char *out_name, const char* ex
 		time_t t = time(NULL);
 		struct tm tm = *localtime(&t);
 		char datecode[32] = {};
-		if (tm.tm_year >= 119) // 2019 or up considered valid time
+		if (tm.tm_year >= 119) 
 		{
 			strftime(datecode, 31, "%Y%m%d_%H%M%S", &tm);
 			snprintf(out_name, buflen, "%s/%s/%s-%s%s", SCREENSHOT_DIR, CoreName2, datecode, name[0] ? name : SCREENSHOT_DEFAULT, extension);
@@ -973,11 +973,15 @@ void FileGenerateSavestatePath(const char *name, char* out_name, int sufx)
 		strcat(fname, name);
 	}
 
+	
+
+
 	char *e = strrchr(fname, '.');
 	if (e) e[0] = 0;
+	else e = fname + strlen(fname);
 
 	if(sufx) sprintf(e, "_%d.ss", sufx);
-	else strcat(e, ".ss");
+	else strcpy(e, ".ss");
 }
 
 uint32_t getFileType(const char *name)
@@ -992,22 +996,22 @@ uint32_t getFileType(const char *name)
 
 static int findPrefixDir(const char *prefix, bool no_prefix_check, char *dir, size_t dir_len)
 {
-	// Searches for the core's folder in the following order:
-	// /media/usb<0..5>/<dir>          (only if no_prefix_check)
-	// /media/usb<0..5>/<prefix>/<dir>
-	// /media/network/<dir>            (only if no_prefix_check)
-	// /media/network/<prefix>/<dir>
-	// /media/fat/cifs/<dir>           (only if no_prefix_check)
-	// /media/fat/cifs/<prefix>/<dir>
-	// /media/fat/<dir>                (only if no_prefix_check)
-	// /media/fat/<prefix>/<dir>
-	//
-	// no_prefix_check enables the legacy layout where system folders lived
-	// directly at the storage root (e.g. /media/fat/SNES). That layout is
-	// no longer recommended; prefer <prefix>/<dir>.
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
 	static char temp_dir[1024];
 
-	// Usb<0..5>
+	
 	for (int x = 0; x < 6; x++) {
 		if (no_prefix_check) {
 			snprintf(temp_dir, 1024, "%s%d/%s", "../usb", x, dir);
@@ -1026,7 +1030,7 @@ static int findPrefixDir(const char *prefix, bool no_prefix_check, char *dir, si
 		}
 	}
 
-	// Network share in /media/network/
+	
 	if (no_prefix_check) {
 		snprintf(temp_dir, 1024, "%s/%s", "../network", dir);
 		if (isPathDirectory(temp_dir)) {
@@ -1036,7 +1040,7 @@ static int findPrefixDir(const char *prefix, bool no_prefix_check, char *dir, si
 		}
 	}
 
-	// Network share in /media/network/<prefix>
+	
 	snprintf(temp_dir, 1024, "%s/%s/%s", "../network", prefix, dir);
 	if (isPathDirectory(temp_dir)) {
 		printf("Found network dir: %s\n", temp_dir);
@@ -1044,7 +1048,7 @@ static int findPrefixDir(const char *prefix, bool no_prefix_check, char *dir, si
 		return 1;
 	}
 
-	// CIFS_DIR directory in /media/fat/cifs
+	
 	if (no_prefix_check) {
 		snprintf(temp_dir, 1024, "%s/%s", CIFS_DIR, dir);
 		if (isPathDirectory(temp_dir)) {
@@ -1054,7 +1058,7 @@ static int findPrefixDir(const char *prefix, bool no_prefix_check, char *dir, si
 		}
 	}
 
-	// CIFS_DIR/<prefix> directory in /media/fat/cifs/<prefix>
+	
 	snprintf(temp_dir, 1024, "%s/%s/%s", CIFS_DIR, prefix, dir);
 	if (isPathDirectory(temp_dir)) {
 		printf("Found CIFS dir: %s\n", temp_dir);
@@ -1062,13 +1066,13 @@ static int findPrefixDir(const char *prefix, bool no_prefix_check, char *dir, si
 		return 1;
 	}
 
-	// media/fat
+	
 	if (no_prefix_check && isPathDirectory(dir)) {
 		printf("Found existing: %s\n", dir);
 		return 1;
 	}
 
-	// media/fat/<prefix>
+	
 	snprintf(temp_dir, 1024, "%s/%s", prefix, dir);
 	if (isPathDirectory(temp_dir)) {
 		printf("Found dir: %s\n", temp_dir);
@@ -1095,7 +1099,7 @@ void prefixGameDir(char *dir, size_t dir_len)
 	{
 		static char temp_dir[1024];
 
-		//FileCreatePath(GAMES_DIR);
+		
 		snprintf(temp_dir, 1024, "%s/%s", GAMES_DIR, dir);
 		strncpy(dir, temp_dir, dir_len);
 		printf("Prefixed dir to %s\n", temp_dir);
@@ -1433,11 +1437,11 @@ static void get_display_name(direntext_t *dext, const char *ext, int options)
 		return;
 	}
 
-	//do not remove ext if core supplies more than 1 extension and it's not list of cores
+	
 	if (!(options & SCANO_CORES) && strlen(ext) > 3) return;
 	if (strchr(ext, '*') || strchr(ext, '?')) return;
 
-	/* find the extension on the end of the name*/
+	
 	char *fext = strrchr(dext->altname, '.');
 	if (fext) *fext = 0;
 }
@@ -1457,7 +1461,7 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 
 	int extlen = strlen(extension);
     int filterlen = filter ? strlen(filter) : 0;
-	//printf("scan dir\n");
+	
 
 	if (mode == SCANF_INIT)
 	{
@@ -1568,7 +1572,7 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 					continue;
 				}
 
-				// Remove leading folders.
+				
 				const char *subpath = _de.d_name + strlen(file_path_in_zip);
 				if (*subpath == '/') subpath++;
 				strcpy(_de.d_name, subpath);
@@ -1577,7 +1581,7 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 
 				_de.d_type = mz_zip_reader_is_file_a_directory(z, i) ? DT_DIR : DT_REG;
 				if (_de.d_type == DT_DIR) {
-					// Remove trailing slash.
+					
 					if (DirNames.find(_de.d_name) != DirNames.end())
 					{
 						DirNames.insert(_de.d_name);
@@ -1589,7 +1593,7 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 					}
 				}
 			}
-			// Handle (possible) symbolic link type in the directory entry
+			
 			else if (de->d_type == DT_LNK || de->d_type == DT_REG)
 			{
 				sprintf(full_path + path_len, "/%s", de->d_name);
@@ -1644,7 +1648,7 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 				}
 				else
 				{
-					// skip hidden folders
+					
 					if (!strncasecmp(de->d_name, ".", 1)) continue;
 				}
 
@@ -1670,7 +1674,7 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 			{
 				if (de->d_type == DT_DIR)
 				{
-					// skip System Volume Information folder
+					
 					if (!strcmp(de->d_name, "System Volume Information")) continue;
 					if (!strcmp(de->d_name, ".."))
 					{
@@ -1678,7 +1682,7 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 					}
 					else
 					{
-						// skip hidden folder
+						
 						if (!strncasecmp(de->d_name, ".", 1)) continue;
 					}
 
@@ -1690,9 +1694,9 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 				}
 				else if (de->d_type == DT_REG)
 				{
-					// skip hidden files
+					
 					if (!strncasecmp(de->d_name, ".", 1)) continue;
-					//skip non-selectable files
+					
 					if (!strcasecmp(de->d_name, "menu.rbf")) continue;
 					if (!strncasecmp(de->d_name, "menu_20", 7)) continue;
 					if (!strncasecmp(de->d_name, "boot", 4))
@@ -1704,7 +1708,7 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 						}
 					}
 
-					//check the prefix if given
+					
 					if (prefix && strncasecmp(prefix, de->d_name, strlen(prefix))) continue;
 
 					if (extlen > 0)
@@ -1713,7 +1717,7 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 						int found = (has_trd && x2trd_ext_supp(de->d_name));
 						if (!found && !(options & SCANO_NOZIP) && !strcasecmp(de->d_name + strlen(de->d_name) - 4, ".zip") && (options & SCANO_DIR))
 						{
-							// Fake that zip-file is a directory.
+							
 							de->d_type = DT_DIR;
 							isZip = 1;
 							found = 1;
@@ -1773,8 +1777,8 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 
 		if (z)
 		{
-			// Since zip files aren't actually folders the entry to
-			// exit the zip file must be added manually.
+			
+			
 			direntext_t dext;
 			memset(&dext, 0, sizeof(dext));
 			dext.de.d_type = DT_DIR;
@@ -1789,9 +1793,37 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 		}
 
 		printf("Got %d dir entries\n", flist_nDirEntries());
-		if (!flist_nDirEntries()) return 0;
 
 		std::sort(DirItem.begin(), DirItem.end(), DirentComp());
+
+		
+
+
+
+
+
+
+
+
+
+
+
+		if ((options & SCANO_CORES) && extension && strcasestr(extension, "RBF"))
+		{
+			char row[256];
+			if (physical_disc_menu_row(row, sizeof(row)))
+			{
+				direntext_t d;
+				memset(&d, 0, sizeof(d));
+				snprintf(d.de.d_name, sizeof(d.de.d_name), "%s", PHYSICAL_DISC_MENU_SENTINEL);
+				d.de.d_type = DT_REG;
+				snprintf(d.altname, sizeof(d.altname), "%s", row);
+				DirItem.push_back(d);
+			}
+		}
+
+		if (!flist_nDirEntries()) return 0;
+
 		if (file_name[0])
 		{
 			int pos = -1;
@@ -1818,7 +1850,7 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 	}
 	else
 	{
-		if (flist_nDirEntries() == 0) // directory is empty so there is no point in searching for any entry
+		if (flist_nDirEntries() == 0) 
 			return 0;
 
 		if (mode == SCANF_END || (mode == SCANF_PREV && iSelectedEntry <= 0))
@@ -1829,13 +1861,13 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 		}
 		else if (mode == SCANF_NEXT)
 		{
-			if(iSelectedEntry + 1 < flist_nDirEntries()) // scroll within visible items
+			if(iSelectedEntry + 1 < flist_nDirEntries()) 
 			{
 				iSelectedEntry++;
 			}
             else
             {
-				// jump to first visible item
+				
 				iSelectedEntry = 0;
             }
 			flist_center_selected();
@@ -1843,7 +1875,7 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 		}
 		else if (mode == SCANF_PREV)
 		{
-			if (iSelectedEntry > 0) // scroll within visible items
+			if (iSelectedEntry > 0) 
 			{
 				iSelectedEntry--;
 				flist_center_selected();
@@ -1885,11 +1917,11 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 		}
 		else if (mode == SCANF_NEXT_CHAR)
 		{
-			//DirItem is sorted, so just advance until the first character changes.
-			//if we reach the end before that don't change anything.
-			//If we change d_type also consider that 'next'. This means next
-			//advances through directories, and then advances through files
-			//
+			
+			
+			
+			
+			
 			int found = -1;
 			char curdType = DirItem[iSelectedEntry].de.d_type;
 			char curChar = DirItem[iSelectedEntry].altname[0]; 
@@ -1916,9 +1948,9 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 		}
 		else if (mode == SCANF_PREV_CHAR)
 		{
-			//Previous seek seeks to the FIRST entry that starts with the previous letter
-			//Search backward until the first char changes, and then continue looking backward
-			//until it changes again. 
+			
+			
+			
 
 
 			int found = -1;
@@ -1955,7 +1987,7 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 		}
 		else
 		{
-			//printf("dir scan for key: %x/%c\n", mode, mode);
+			
 			mode = toupper(mode);
 			if ((mode >= '0' && mode <= '9') || (mode >= 'A' && mode <= 'Z'))
 			{
@@ -2001,6 +2033,23 @@ char* flist_Path()
 int flist_nDirEntries()
 {
 	return DirItem.size();
+}
+
+
+
+
+void flist_select_by_name(const char *name)
+{
+	if (!name || !name[0]) return;
+	for (int i = 0; i < (int)DirItem.size(); i++)
+	{
+		if (!strcmp(DirItem[i].de.d_name, name))
+		{
+			iSelectedEntry = i;
+			flist_center_selected();
+			return;
+		}
+	}
 }
 
 int flist_iFirstEntry()
@@ -2078,7 +2127,7 @@ bool FileOpenTextReader( fileTextReader *reader, const char *filename )
 {
 	fileTYPE f;
 
-	// ensure buffer is freed if the reader is being reused
+	
 	reader->~fileTextReader();
 
 	if (FileOpen(&f, filename))
@@ -2182,7 +2231,7 @@ static int findAssetByCrc(char *path, size_t path_len, uint32_t romcrc, const ch
 static int findAssetInSameDir(char *path, size_t path_len, const char *rom_path, const char *ext)
 {
 	snprintf(path, path_len, "%s", getFullPath(rom_path));
-	char *p = strrchr(path, '/'); // impossible to fail
+	char *p = strrchr(path, '/'); 
 	*p = 0;
 
 	DIR *d = opendir(path);
@@ -2214,7 +2263,7 @@ static int findAssetInSameDir(char *path, size_t path_len, const char *rom_path,
 
 static bool findPsxAsset(char *path, size_t path_len, const char *rom_path, const char *ext, const char *core_dir, gameAssetValidator *validator)
 {
-	// lookup based on file name
+	
 	const char *rom_name = strrchr(rom_path, '/');
 	if (rom_name)
 	{
@@ -2226,7 +2275,7 @@ static bool findPsxAsset(char *path, size_t path_len, const char *rom_path, cons
 		if (validAsset(path, validator)) return true;
 	}
 
-	// lookup based on game ID
+	
 	const char *game_id = psx_get_game_id();
 	if (game_id && game_id[0])
 	{

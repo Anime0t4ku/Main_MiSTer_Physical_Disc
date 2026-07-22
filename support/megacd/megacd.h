@@ -2,7 +2,7 @@
 #define MEGACD_H
 
 
-// CDD status
+
 #define CD_STAT_STOP			0x00
 #define CD_STAT_PLAY			0x01
 #define CD_STAT_SEEK			0x02
@@ -19,13 +19,13 @@
 #define CD_STAT_TRAY			0x0E
 #define CD_STAT_TEST			0x0F
 
-// CDD command
+
 #define CD_COMM_IDLE			0x00
 #define CD_COMM_STOP			0x01
 #define CD_COMM_TOC				0x02
 #define CD_COMM_PLAY			0x03
 #define CD_COMM_SEEK			0x04
-//#define CD_COMM_OPEN			0x05
+
 #define CD_COMM_PAUSE			0x06
 #define CD_COMM_RESUME			0x07
 #define CD_COMM_FW_SCAN			0x08
@@ -54,9 +54,8 @@ public:
 
 	cdd_t();
 	int Load(const char *filename);
-	int LoadPhysical();
-	int IsPhysical() const;
-	static int PhysicalDiscPresent();
+	int SwapPhys();                       
+	int is_phys() { return toc.phys; }
 	void Unload();
 	void Reset();
 	void Update();
@@ -75,7 +74,6 @@ private:
 	int chd_hunknum;
 	uint8_t *chd_hunkbuf;
 	int chd_audio_read_lba;
-	int physical;
 	uint8_t stat[10];
 	uint8_t comm[10];
 
@@ -96,16 +94,14 @@ private:
 
 #define CD_SCAN_SPEED 30
 
-//cdd.cpp
+
 extern cdd_t cdd;
 
 
 void mcd_poll();
-void mcd_set_image(int num, const char *filename);
-void mcd_use_physical_cd();
-void mcd_physical_stats_reset();
-void mcd_physical_stats_poll();
-void mcd_physical_note_fpga_wait(uint8_t type);
+
+
+int mcd_set_image(int num, const char *filename);
 void mcd_reset();
 int mcd_send_data(uint8_t* buf, int len, uint8_t index);
 int mcd_can_send_data(uint8_t type);

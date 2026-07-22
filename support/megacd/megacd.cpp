@@ -11,52 +11,44 @@
 #include "../../menu.h"
 #include "../../cheats.h"
 #include "megacd.h"
+#include "../physical_disc/physical_disc.h"
 
-#define SAVE_IO_INDEX 5 // fake download to trigger save loading
+#define SAVE_IO_INDEX 5 
 
 #define MCD_GET_CMD        0
 #define MCD_GET_SEND_DATA  1
 
 static int need_reset=0;
 static uint8_t has_command = 0;
-static int mcd_physical_enabled = 0;
-static int mcd_physical_present = 0;
-static uint32_t mcd_physical_poll_timer = 0;
 
 void mcd_poll()
 {
 	static uint32_t poll_timer = 0;
 	static uint8_t last_req = 255;
 	static uint8_t adj = 0;
+	static uint32_t swap_close_at = 0;
 
-	if (!mcd_physical_enabled && !strcasecmp(user_io_get_core_name(), "CD-MegaCD"))
-		mcd_use_physical_cd();
+	
 
-	if (mcd_physical_enabled && (!mcd_physical_poll_timer || CheckTimer(mcd_physical_poll_timer))) {
-		mcd_physical_poll_timer = GetTimer(500);
-		int present = cdd_t::PhysicalDiscPresent();
-		if (present != mcd_physical_present) {
-			mcd_physical_present = present;
-			if (present) {
-				printf("MCD-CD: physical disc inserted\n");
-				cdd.LoadPhysical();
-				cdd.status = cdd.loaded ? CD_STAT_STOP : CD_STAT_NO_DISC;
-				cdd.latency = 10;
-				cdd.SendData = mcd_send_data;
-				cdd.CanSendData = mcd_can_send_data;
-			} else {
-				printf("MCD-CD: physical disc removed\n");
-				cdd.Unload();
-				cdd.status = CD_STAT_NO_DISC;
-			}
-		}
+
+	if (cdd.is_phys() && physical_disc_swap_consume() && cdd.SwapPhys())
+	{
+		cdd.isData = 1;
+		cdd.status = CD_STAT_OPEN;      
+		cdd.latency = 0;
+		swap_close_at = GetTimer(PHYSICAL_DISC_SWAP_DWELL_MS);
 	}
-	if (mcd_physical_enabled) mcd_physical_stats_poll();
+	if (cdd.is_phys() && swap_close_at && CheckTimer(swap_close_at))   
+	{
+		swap_close_at = 0;
+		cdd.status = cdd.loaded ? CD_STAT_STOP : CD_STAT_NO_DISC;   
+		cdd.latency = 10;
+	}
 
 	if (!poll_timer || CheckTimer(poll_timer))
 	{
 		if (!cdd.isData && cdd.status == CD_STAT_PLAY && cdd.latency == 0) {
-			// Send audio sectors faster so buffer stays filled
+			
 			poll_timer = GetTimer(10);
 			adj = 0;
 		} else {
@@ -74,7 +66,7 @@ void mcd_poll()
 
 			has_command = 0;
 
-			//printf("\x1b[32mMCD: Send status, status = %04X%04X%04X, frame = %u\n\x1b[0m", (uint16_t)((s >> 32) & 0x00FF), (uint16_t)((s >> 16) & 0xFFFF), (uint16_t)((s >> 0) & 0xFFFF), frame);
+			
 		}
 
 		cdd.Update();
@@ -106,7 +98,7 @@ void mcd_poll()
 		has_command = 1;
 
 
-		//printf("\x1b[32mMCD: Get command, command = %04X%04X%04X, has_command = %u\n\x1b[0m", data_in[2], data_in[1], data_in[0], has_command);
+		
 	}
 	else
 		DisableIO();
@@ -143,17 +135,40 @@ static int mcd_load_rom(const char *basename, const char *name, int sub_index)
 	return 0;
 }
 
-void mcd_set_image(int num, const char *filename)
+int mcd_set_image(int num, const char *filename)
 {
 	static char last_dir[1024] = {};
 
 	(void)num;
-	mcd_physical_enabled = 0;
 
 	cdd.Unload();
+	physical_disc_swap_enable(0);              
 	cdd.status = CD_STAT_OPEN;
 
+	int phys = !strcmp(filename, PHYSICAL_DISC_SENTINEL);
+	physical_disc_region_t disc_region = PHYSICAL_DISC_REGION_UNKNOWN;
+
+	
+
+
+
+	if (phys && !physical_disc_open(NULL))
+	{
+		disc_region = physical_disc_region();
+		
+
+
+		if (!physical_disc_disc_present()) physical_disc_close();
+	}
+
 	int same_game = *filename && *last_dir && !strncmp(last_dir, filename, strlen(last_dir));
+
+	
+
+
+
+	if (phys) same_game = 0;
+
 	strcpy(last_dir, filename);
 	char *p = strrchr(last_dir, '/');
 	if (p) *p = 0;
@@ -168,38 +183,97 @@ void mcd_set_image(int num, const char *filename)
 		mcd_reset();
 
 		loaded = 0;
-		strcpy(buf, last_dir);
-		char *p = strrchr(buf, '/');
-		if (p)
+		if (phys)
 		{
-			strcpy(p + 1, "cd_bios.rom");
-			loaded = user_io_file_tx(buf);
+			
+
+
+
+			const char *rn = physical_disc_region_name(disc_region);
+			if (*rn)
+			{
+				sprintf(buf, "%s/boot_%s.rom", HomeDir(), rn);
+				loaded = user_io_file_tx(buf);
+				if (!loaded)
+				{
+					sprintf(buf, "%s/bios_%s.rom", HomeDir(), rn);
+					loaded = user_io_file_tx(buf);
+				}
+			}
+			printf("\x1b[32mMCD: physical disc region %s%s\n\x1b[0m",
+				*rn ? rn : "unknown",
+				loaded ? ", loaded matching BIOS" : ", falling back to boot.rom");
+		}
+		else
+		{
+			strcpy(buf, last_dir);
+			char *bp = strrchr(buf, '/');
+			if (bp)
+			{
+				strcpy(bp + 1, "cd_bios.rom");
+				loaded = user_io_file_tx(buf);
+			}
 		}
 
 		if (!loaded)
 		{
 			sprintf(buf, "%s/boot.rom", HomeDir());
 			loaded = user_io_file_tx(buf);
+
+			
+
+
+			if (loaded && phys && disc_region != PHYSICAL_DISC_REGION_UNKNOWN)
+			{
+				static uint8_t hdr[0x200];
+				physical_disc_region_t bios_region = PHYSICAL_DISC_REGION_UNKNOWN;
+
+				if (FileLoad(buf, hdr, sizeof(hdr)) >= 0x1F3)
+					bios_region = physical_disc_region_from_md_header(hdr, sizeof(hdr));
+
+				if (bios_region != PHYSICAL_DISC_REGION_UNKNOWN && bios_region != disc_region)
+				{
+					static char msg[128];
+					sprintf(msg, "%s disc on %s BIOS - add boot_%s.rom",
+						physical_disc_region_name(disc_region),
+						physical_disc_region_name(bios_region),
+						physical_disc_region_name(disc_region));
+					printf("\x1b[32mMCD: WARNING: %s\n\x1b[0m", msg);
+					Info(msg, 6000);
+				}
+			}
 		}
 
 		if (!loaded) Info("CD BIOS not found!", 4000);
 	}
 
+	int mounted = 0;
 	if (loaded && *filename)
 	{
 		if (cdd.Load(filename) > 0)
 		{
+			mounted = 1;
 			cdd.status = cdd.loaded ? CD_STAT_STOP : CD_STAT_NO_DISC;
 			cdd.latency = 10;
 			cdd.SendData = mcd_send_data;
 			cdd.CanSendData = mcd_can_send_data;
+			if (phys) physical_disc_swap_enable(1);   
 
 			if (!same_game)
 			{
-				mcd_load_rom(filename, "cd_bios.rom", 0);
-				mcd_load_rom(filename, "cart.rom", 1);
-				mcd_mount_save(filename);
-				cheats_init(filename, 0);
+				if (phys)
+				{
+					
+
+					mcd_mount_save("physical_disc.sav");
+				}
+				else
+				{
+					mcd_load_rom(filename, "cd_bios.rom", 0);
+					mcd_load_rom(filename, "cart.rom", 1);
+					mcd_mount_save(filename);
+					cheats_init(filename, 0);
+				}
 			}
 		}
 		else
@@ -207,30 +281,10 @@ void mcd_set_image(int num, const char *filename)
 			cdd.status = CD_STAT_NO_DISC;
 		}
 	}
-}
 
-void mcd_use_physical_cd()
-{
-	printf("MCD-CD: Use Physical Disc selected\n");
-	mcd_physical_enabled = 1;
-	mcd_physical_poll_timer = 0;
-	mcd_physical_present = cdd_t::PhysicalDiscPresent();
-	cdd.Unload();
-
-	sprintf(buf, "%s/boot.rom", HomeDir());
-	if (!user_io_file_tx(buf)) Info("CD BIOS not found!", 4000);
-
-	if (!mcd_physical_present || !cdd.LoadPhysical()) {
-		cdd.status = CD_STAT_NO_DISC;
-		Info("Physical CD mode enabled - insert a disc", 3000);
-		return;
-	}
-	cdd.status = CD_STAT_STOP;
-	cdd.latency = 10;
-	cdd.SendData = mcd_send_data;
-	cdd.CanSendData = mcd_can_send_data;
-	mcd_reset();
-	Info("Physical Mega CD disc mounted", 2000);
+	
+	
+	return mounted;
 }
 
 void mcd_reset() {
@@ -238,7 +292,7 @@ void mcd_reset() {
 }
 
 int mcd_send_data(uint8_t* buf, int len, uint8_t index) {
-	// set index byte
+	
 	user_io_set_index(index);
 
 	user_io_set_download(1);
@@ -338,13 +392,12 @@ int mcd_can_send_data(uint8_t type) {
 		return 1;
 	}
 
-	// Ask the FPGA if it is ready to receive a sector
+	
 	spi_uio_cmd_cont(UIO_CD_GET);
 	spi_w(MCD_GET_SEND_DATA | (type << 2));
 
 	uint16_t data = spi_w(0);
 	DisableIO();
-	if (data != 1) mcd_physical_note_fpga_wait(type);
 
 	return (data == 1);
 }

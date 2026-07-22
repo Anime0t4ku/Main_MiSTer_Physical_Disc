@@ -1,12 +1,13 @@
-// Part of Neogeo_MiSTer
-// (C) 2019 Sean 'furrtek' Gonsalves
+
+
 
 #include <string.h>
 #include <stdlib.h>
 #include <sys/stat.h>
-#include <time.h>   // clock_gettime, CLOCK_REALTIME
+#include <time.h>   
 #include "neogeo_loader.h"
 #include "neogeocd.h"
+#include "../physical_disc/physical_disc.h"
 #include "../../sxmlc.h"
 #include "../../user_io.h"
 #include "../../fpga_io.h"
@@ -24,53 +25,53 @@ struct NeoFile
 	uint32_t NGH;
 	uint8_t Name[33];
 	uint8_t Manu[17];
-	uint8_t Filler[128 + 290];	//fill to 512
-	uint8_t Filler2[4096 - 512];	//fill to 4096
+	uint8_t Filler[128 + 290];	
+	uint8_t Filler2[4096 - 512];	
 };
 
 static inline void spr_convert(uint16_t* buf_in, uint16_t* buf_out, uint32_t size)
 {
-	/*
-	In C ROMs, a word provides two bitplanes for an 8-pixel wide line
-	They're used in pairs to provide 32 bits at once (all four bitplanes)
-	For one sprite tile, bytes are used like this: ([...] represents one 8-pixel wide line)
-	Even ROM					Odd ROM
-	[  40 41  ][  00 01  ]		[  42 43  ][  02 03  ]
-	[  44 45  ][  04 05  ]  	[  46 47  ][  06 07  ]
-	[  48 49  ][  08 09  ]  	[  4A 4B  ][  0A 0B  ]
-	[  4C 4D  ][  0C 0D  ]  	[  4E 4F  ][  0E 0F  ]
-	[  50 51  ][  10 11  ]  	[  52 53  ][  12 13  ]
-	...							...
-	The data read for a given tile line (16 pixels) is always the same, only the rendering order of the pixels can change
-	To take advantage of the SDRAM burst read feature, the data can be loaded so that all 16 pixels of a tile
-	line can be read sequentially: () are 16-bit words, [] is the 4-word burst read
-	[(40 41) (00 01) (42 43) (02 03)]
-	[(44 45) (04 05) (46 47) (06 07)]...
-	Word interleaving is done on the FPGA side to mix the two C ROMs data (even/odd)
+	
 
-	In:  FEDCBA9876 54321 0
-	Out: FEDCBA9876 15432 0
-	*/
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 	for (uint32_t i = 0; i < size; i++) buf_out[i] = buf_in[(i & ~0x1F) | ((i >> 1) & 0xF) | (((i & 1) ^ 1) << 4)];
 
-	/*
-	0 <- 20
-	1 <- 21
-	2 <- 00
-	3 <- 01
-	4 <- 22
-	5 <- 23
-	6 <- 02
-	7 <- 03
-	...
+	
 
-	00 -> 02
-	01 -> 03
-	02 -> 06
-	03 -> 07
-	...
-	*/
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 }
 
 static inline void spr_convert_skp(uint16_t* buf_in, uint16_t* buf_out, uint32_t size)
@@ -85,26 +86,26 @@ static inline void spr_convert_dbl(uint16_t* buf_in, uint16_t* buf_out, uint32_t
 
 static void fix_convert(uint8_t* buf_in, uint8_t* buf_out, uint32_t size)
 {
-	/*
-	In S ROMs, a byte provides two pixels
-	For one fix tile, bytes are used like this: ([...] represents a pair of pixels)
-	[10][18][00][08]
-	[11][19][01][09]
-	[12][1A][02][0A]
-	[13][1B][03][0B]
-	[14][1C][04][0C]
-	[15][1D][05][0D]
-	[16][1E][06][0E]
-	[17][1F][07][0F]
-	The data read for a given tile line (8 pixels) is always the same
-	To take advantage of the SDRAM burst read feature, the data can be loaded so that all 8 pixels of a tile
-	line can be read sequentially: () are 16-bit words, [] is the 2-word burst read
-	[(10 18) (00 08)]
-	[(11 19) (01 09)]...
+	
 
-	In:  FEDCBA9876543210
-	Out: FEDCBA9876510432
-	*/
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 	for (uint32_t i = 0; i < size; i++) buf_out[i] = buf_in[(i & ~0x1F) | ((i >> 2) & 7) | ((i & 1) << 3) | (((i & 2) << 3) ^ 0x10)];
 }
 
@@ -133,7 +134,7 @@ static const char *get_name(const char *path, const char *name)
 static uint32_t neogeo_file_tx(const char* path, const char* name, uint8_t neo_file_type, uint8_t index, uint32_t offset, uint32_t size)
 {
 	fileTYPE f = {};
-	uint8_t buf[4096];	// Same in user_io_file_tx
+	uint8_t buf[4096];	
 	uint8_t buf_out[4096];
 	static char name_buf[1024];
 
@@ -148,12 +149,12 @@ static uint32_t neogeo_file_tx(const char* path, const char* name, uint8_t neo_f
 	printf("Loading %s (offset %u, size %u, type %u) with index %u\n", name, offset, bytes2send, neo_file_type, index);
 	const char *dispname = get_name(path, name);
 
-	// Put pairs of bitplanes in the correct order for the core
+	
 	if (neo_file_type == NEO_FILE_SPR && index != 15) index ^= 1;
-	// set index byte
+	
 	user_io_set_index(index);
 
-	// prepare transmission of new file
+	
 	user_io_set_download(1);
 
 	ProgressMessage();
@@ -195,7 +196,7 @@ static uint32_t neogeo_file_tx(const char* path, const char* name, uint8_t neo_f
 	FileClose(&f);
 	ProgressMessage();
 
-	// signal end of transmission
+	
 	user_io_set_download(0);
 	return size;
 }
@@ -234,7 +235,7 @@ static uint32_t load_crom_to_mem(const char* path, const char* name, uint8_t ind
 	printf("CROM %s (offset %u, size %u) with index %u\n", name, offset, size, index);
 	const char *dispname = get_name(path, name);
 
-	// Put pairs of bitplanes in the correct order for the core
+	
 
 	uint32_t remain = size;
 	uint32_t map_addr = 0x38000000 + (((index - 64) >> 1) * 1024 * 1024);
@@ -245,7 +246,7 @@ static uint32_t load_crom_to_mem(const char* path, const char* name, uint8_t ind
 		uint32_t partsz = remain;
 		if (partsz > LOADBUF_SZ) partsz = LOADBUF_SZ;
 
-		//printf("partsz=%d, map_addr=0x%X\n", partsz, map_addr);
+		
 		void *base = shmem_map(map_addr, partsz);
 		if (!base)
 		{
@@ -308,7 +309,7 @@ static uint32_t load_rom_to_mem(const char* path, const char* name, uint8_t neo_
 		uint32_t partszf = remainf;
 		if (partszf > LOADBUF_SZ) partszf = LOADBUF_SZ;
 
-		//printf("partsz=%d, map_addr=0x%X\n", partsz, map_addr);
+		
 		void *base = shmem_map(map_addr, partsz);
 		if (!base)
 		{
@@ -371,7 +372,7 @@ static void notify_core(uint8_t index, uint32_t size, uint32_t memcp_force = 0)
 	spi_w(index);
 	spi_w((uint16_t)size);
 	spi_w(size >> 16);
-	spi_w(memcp); //copy flag
+	spi_w(memcp); 
 	spi_w(0);
 	DisableFpga();
 
@@ -392,10 +393,10 @@ static uint32_t fill_ram(uint32_t size, uint8_t pattern)
 static uint32_t crom_sz = 0;
 static uint32_t neogeo_tx(const char* path, const char* name, uint8_t neo_file_type, int16_t index, uint32_t offset, uint32_t size, uint32_t expand = 0, int swap = 0)
 {
-	/*
-	if (index >= 0) neogeo_file_tx(path, name, neo_file_type, index, offset, size);
-	return 0;
-	*/
+	
+
+
+
 
 	uint32_t sz = 0;
 
@@ -419,7 +420,7 @@ static uint32_t neogeo_tx(const char* path, const char* name, uint8_t neo_file_t
 		sz = load_rom_to_mem(path, name, neo_file_type, index, offset, size, expand, swap, 0);
 		if (!sz) return 0;
 
-		//multipart prom
+		
 		if (!strcasecmp(name, "prom") && index == 4) sz += load_rom_to_mem(path, "prom1", neo_file_type, index, offset, size, expand, swap, sz);
 
 		if (sz) notify_core(index, sz);
@@ -528,7 +529,7 @@ static void parse_xml(const char* filename, const SAX_Callbacks* sax, void* user
 	fileTYPE f = {};
 	if(FileOpen(&f, filename) && f.size)
 	{
-		void *buf = malloc(f.size+1); // plus null;
+		void *buf = malloc(f.size+1); 
 		if (buf)
 		{
 			int size = FileReadAdv(&f, buf, f.size);
@@ -861,7 +862,7 @@ static int xml_load_files(XMLEvent evt, const XMLNode* node, SXML_CHAR* text, co
 					if (!strcasecmp(node->attributes[i].name, "index")) use_index = 1;
 				}
 
-				//printf("using index = %d\n", use_index);
+				
 
 				for (int i = 0; i < node->n_attributes; i++) {
 					if (!strcasecmp(node->attributes[i].name, "name"))
@@ -1013,23 +1014,23 @@ struct NeoQuirk
 };
 
 static NeoQuirk neo_quirks[] = {
-	{0x022,	0, 0, 0, 0, 0, 1, 0, 0 }, // Blue's Journey
-	{0x050,	0, 0, 0, 0, 0, 0, 1, 0 }, // Ninja Commando
-	{0x052,	1, 0, 0, 0, 0, 0, 0, 0 }, // Super Sidekicks
-	{0x047,	1, 0, 0, 0, 0, 0, 0, 0 }, // Fatal Fury 2
-	{0x006,	2, 0, 0, 0, 0, 0, 0, 0 }, // Riding Hero
-	{0x263,	0, 1, 0, 0, 0, 0, 0, 0 }, // Metal Slug 4
-	{0x253,	0, 1, 0, 2, 0, 0, 0, 0 }, // Garou - Mark of the Wolves
-	{0x251,	0, 0, 0, 1, 0, 0, 0, 0 }, // King of Fighters 99
-	{0x257,	0, 2, 0, 5, 0, 0, 0, 0 }, // King of Fighters 2000
-	{0x271,	0, 2, 1, 0, 0, 0, 0, 0 }, // King of Fighters 2003
-	{0x055,	0, 0, 0, 0, 0, 0, 1, 1 }, // King of Fighters 94
-	{0x266,	0, 2, 0, 0, 0, 0, 0, 0 }, // Matrimelee
-	{0x256,	0, 1, 0, 4, 0, 0, 0, 0 }, // Metal Slug 3
-	{0x268,	0, 0, 1, 0, 0, 0, 0, 0 }, // Metal Slug 5
-	{0x269,	0, 2, 1, 0, 0, 0, 0, 0 }, // SNK vs Capcom
-	{0x008,	0, 0, 0, 0, 1, 0, 0, 0 }, // JockeyGP
-	{0x3E7,	0, 0, 0, 0, 1, 0, 0, 0 }, // V-Liner
+	{0x022,	0, 0, 0, 0, 0, 1, 0, 0 }, 
+	{0x050,	0, 0, 0, 0, 0, 0, 1, 0 }, 
+	{0x052,	1, 0, 0, 0, 0, 0, 0, 0 }, 
+	{0x047,	1, 0, 0, 0, 0, 0, 0, 0 }, 
+	{0x006,	2, 0, 0, 0, 0, 0, 0, 0 }, 
+	{0x263,	0, 1, 0, 0, 0, 0, 0, 0 }, 
+	{0x253,	0, 1, 0, 2, 0, 0, 0, 0 }, 
+	{0x251,	0, 0, 0, 1, 0, 0, 0, 0 }, 
+	{0x257,	0, 2, 0, 5, 0, 0, 0, 0 }, 
+	{0x271,	0, 2, 1, 0, 0, 0, 0, 0 }, 
+	{0x055,	0, 0, 0, 0, 0, 0, 1, 1 }, 
+	{0x266,	0, 2, 0, 0, 0, 0, 0, 0 }, 
+	{0x256,	0, 1, 0, 4, 0, 0, 0, 0 }, 
+	{0x268,	0, 0, 1, 0, 0, 0, 0, 0 }, 
+	{0x269,	0, 2, 1, 0, 0, 0, 0, 0 }, 
+	{0x008,	0, 0, 0, 0, 1, 0, 0, 0 }, 
+	{0x3E7,	0, 0, 0, 0, 1, 0, 0, 0 }, 
 };
 
 void load_neo(char *path)
@@ -1050,21 +1051,21 @@ void load_neo(char *path)
 				{
 					bool skip = false;
 					switch (hdr.NGH) {
-						case 0x0251: if (hdr.PSize != 9437184) skip = true; break; // (kof99 prototype vs final)
-						case 0x0253: if (hdr.PSize != 9437184) skip = true;        // (garou prototype vs the different SMA chip versions) garouh needs SMA=3
+						case 0x0251: if (hdr.PSize != 9437184) skip = true; break; 
+						case 0x0253: if (hdr.PSize != 9437184) skip = true;        
 							if (hdr.Name[27] == 'A')
-								{sma = 3; cmc = 1; mir = 0; skip = true;}          // (Not ideal, but their headers are otherwise identical)
+								{sma = 3; cmc = 1; mir = 0; skip = true;}          
 							break;
-						case 0x0256: if (hdr.PSize != 9437184) skip = true; break; // (mslug3 using SMA vs normal banking)
-						case 0x0263: if (hdr.SSize != 524288)  skip = true; break; // (mslug4 bootlegs vs original)
-						case 0x0268: if (hdr.PSize == 5242880) ms5p = 1;           // (mslug5 bootlegs vs original)
+						case 0x0256: if (hdr.PSize != 9437184) skip = true; break; 
+						case 0x0263: if (hdr.SSize != 524288)  skip = true; break; 
+						case 0x0268: if (hdr.PSize == 5242880) ms5p = 1;           
 							if (hdr.PSize != 8388608) skip = true;
 							break;
-						case 0x0269: if (hdr.PSize != 8388608)  skip = true;        // (svc bootlegs vs original)
+						case 0x0269: if (hdr.PSize != 8388608)  skip = true;        
 							if (hdr.Name[15] == 'S')
-								{cmc = 0; pvc = 1;  skip = true;}                   // (svcsplus requires pvc=1)
+								{cmc = 0; pvc = 1;  skip = true;}                   
 							break;
-						case 0x0271: if (hdr.PSize != 9437184) skip = true; break; // (kof2003 bootlegs vs original)
+						case 0x0271: if (hdr.PSize != 9437184) skip = true; break; 
 					}
 					if (skip) break;
 
@@ -1140,9 +1141,15 @@ void load_neo(char *path)
 
 int neogeo_romset_tx(char* name, int cd_en)
 {
+	
+	
+	int phys = !strcmp(name, PHYSICAL_DISC_SENTINEL);
+	int cd_bios_ok = 1;   
+
 	char *romset = strrchr(name, '/');
-	if (!romset) return 0;
-	romset++;
+	if (romset) romset++;
+	else if (phys) romset = name;   
+	else return 0;
 
 	int system_mvs, system_cdz;
 	static char full_path[1024];
@@ -1155,7 +1162,7 @@ int neogeo_romset_tx(char* name, int cd_en)
 	uint16_t mask = spi_w(0);
 	DisableIO();
 
-	user_io_status_set("[0]", 1);	// Maintain reset
+	user_io_status_set("[0]", 1);	
 
 	crom_sz_max = 0;
 	crom_start = 0;
@@ -1164,11 +1171,11 @@ int neogeo_romset_tx(char* name, int cd_en)
 
 	const char* home = HomeDir(cd_en ? NEOCD_DIR : NULL);
 
-	// Send cd_en to the FPGA before loading files
+	
 	set_config((cd_en & 1) << 31, 1 << 31);
 	notify_conf();
 
-	// Look for the romset's file list in romsets.xml
+	
 	if (!cd_en)
 	{
 		char *p = strrchr(name, '.');
@@ -1218,16 +1225,16 @@ int neogeo_romset_tx(char* name, int cd_en)
 		}
 	}
 
-	// Load system ROMs
+	
 	if (strcmp(romset, "debug")) {
-		// Not loading the special 'debug' romset
+		
 		if (!cd_en) {
 			sprintf(full_path, "%s/uni-bios.rom", home);
 			if (!(mask & 0x8000) && FileExists(full_path)) {
-				// Autoload Unibios for cart systems if present
+				
 				neogeo_tx(home, "uni-bios.rom", NEO_FILE_RAW, 0, 0, 0x20000);
 			} else {
-				// Otherwise load normal system roms
+				
 				if (!system_mvs)
 					neogeo_tx(home, "neo-epo.sp1", NEO_FILE_RAW, 0, 0, 0x20000);
 				else
@@ -1235,26 +1242,33 @@ int neogeo_romset_tx(char* name, int cd_en)
 			}
 		} else {
 			fill_ram(128 * 1024, 0xAA);
+			
+			
+			
 			sprintf(full_path, "%s/uni-bioscd.rom", home);
 			if (!(mask & 0x8000) && FileExists(full_path)) {
 				neogeo_tx(home, "uni-bioscd.rom", NEO_FILE_RAW, 0, 0, 0x80000);
 			} else if (!system_cdz) {
-				// NeoGeo CD
+				
+				sprintf(full_path, "%s/top-sp1.bin", home);
+				cd_bios_ok = FileExists(full_path);
 				neogeo_tx(home, "top-sp1.bin", NEO_FILE_RAW, 0, 0, 0x80000);
 			} else {
-				// NeoGeo CDZ
+				
+				sprintf(full_path, "%s/neocd.bin", home);
+				cd_bios_ok = FileExists(full_path);
 				neogeo_tx(home, "neocd.bin", NEO_FILE_RAW, 0, 0, 0x80000);
 			}
 		}
 	}
 
-	//flush CROM if any.
+	
 	neogeo_tx(NULL, NULL, 0, -1, 0, 0);
 
 	if (!cd_en)	neogeo_tx(home, "sfix.sfix", NEO_FILE_FIX, 2, 0, 0);
 	if (!neogeo_file_tx(home, "000-lo.lo", NEO_FILE_8BIT, 1, 0, 0x10000) && cd_en)
 	{
-		//fallback to original NeoGeo folder
+		
 		neogeo_file_tx(HomeDir(), "000-lo.lo", NEO_FILE_8BIT, 1, 0, 0x10000);
 	}
 
@@ -1269,10 +1283,13 @@ int neogeo_romset_tx(char* name, int cd_en)
 
 	notify_conf();
 
-	FileGenerateSavePath(name, (char*)full_path);
+	
+	FileGenerateSavePath(phys ? "physical_disc" : name, (char*)full_path);
 	user_io_file_mount((char*)full_path, 0, 1);
 
-	user_io_status_set("[0]", 0); // Release reset
+	user_io_status_set("[0]", 0); 
 
-	return 1;
+	
+	
+	return cd_bios_ok;
 }
