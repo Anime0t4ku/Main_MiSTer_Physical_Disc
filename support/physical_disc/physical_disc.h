@@ -107,6 +107,7 @@ int physical_disc_read_data2048(int lba, uint8_t *dst);
 
 
 
+void physical_disc_prewarm_blocking(void);
 void physical_disc_seek_hint(int lba);
 
 

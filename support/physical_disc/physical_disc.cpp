@@ -1182,6 +1182,40 @@ int physical_disc_current_toc(toc_t *toc)
 	return 0;
 }
 
+void physical_disc_prewarm_blocking(void)
+{
+	if (pcd.fd < 0 || pcd.ntrk < 1 || pcd.leadout <= 0) return;
+	int lba = pcd.trk[0].start;
+	double start = now_ms();
+	int ready = 0;
+	while (now_ms() - start < 8000)
+	{
+		if (!fill_cache(lba, SYNC_BURST, 1))
+		{
+			ready = 1;
+			break;
+		}
+	}
+	if (!ready) return;
+	int span = pcd.leadout - lba;
+	if (span > 8 * SYNC_BURST)
+	{
+		static const int points[] = { 2, 3, 1 };
+		for (unsigned i = 0; i < sizeof(points) / sizeof(points[0]); i++)
+		{
+			int target = lba + (int)(((int64_t)span * points[i]) / 4);
+			if (target + SYNC_BURST > pcd.leadout) target = pcd.leadout - SYNC_BURST;
+			fill_cache(target, SYNC_BURST, 1);
+		}
+	}
+	for (int i = 1; i < 8; i++)
+	{
+		if (fill_cache(lba + i * SYNC_BURST, SYNC_BURST, 1)) break;
+	}
+	pcd.cursor[0] = lba;
+	pcd.wactive[0] = 1;
+}
+
 void physical_disc_seek_hint(int lba)
 {
 	if (lba < 0 || !pcd.ntrk) return;

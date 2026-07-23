@@ -402,6 +402,7 @@ static int load_physical_cd(toc_t* table)
 		table->tracks[i].indexes[1] = i ? 0 : 150;
 	}
 	table->end += 150;
+	physical_disc_prewarm_blocking();
 	return 1;
 }
 
@@ -969,7 +970,10 @@ void cdi_read_cd(uint8_t* buffer, int lba, int cnt)
 			{
 				int disc_lba = lba - 150;
 				if (disc_lba >= 0 && lba < toc.end)
+				{
+					physical_disc_seek_hint(disc_lba);
 					physical_disc_read_sector(disc_lba, buffer, NULL);
+				}
 				else
 					memset(buffer, 0, CDI_SECTOR_LEN);
 				check_scramble(lba, buffer);

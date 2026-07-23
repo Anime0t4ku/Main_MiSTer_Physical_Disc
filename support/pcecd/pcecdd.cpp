@@ -271,6 +271,7 @@ int pcecdd_t::Load(const char *filename)
 			printf("\x1b[32mPCECD: no readable physical disc\n\x1b[0m");
 			return -1;
 		}
+		physical_disc_prewarm_blocking();
 	} else if (!strncasecmp(".cue", ext, 4))
 	{
 		if (LoadCUE(filename)) return -1;
@@ -516,6 +517,8 @@ void pcecdd_t::Update() {
 		{
 			if (this->CDDAMode == PCECD_CDDAMODE_LOOP) {
 				this->lba = this->CDDAStart;
+				if (this->toc.phys)
+					physical_disc_seek_hint(this->lba);
 			}
 			else {
 				this->state = PCECD_STATE_IDLE;
@@ -778,6 +781,9 @@ void pcecdd_t::CommandExec() {
 		int index = GetTrackByLBA(new_lba, &this->toc);
 
 		this->index = index;
+
+		if (this->toc.phys && !this->toc.tracks[index].type)
+			physical_disc_seek_hint(new_lba);
 
 		this->CDDAStart = new_lba;
 		this->CDDAEnd = this->toc.end;
