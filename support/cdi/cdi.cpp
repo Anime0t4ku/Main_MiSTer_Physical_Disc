@@ -1157,13 +1157,14 @@ int cdi_mount_cd(int s_index, const char* filename)
 	{
 		if (load_cd_image(filename, &toc) && toc.last)
 		{
-			if (!strcmp(filename, PHYSICAL_DISC_SENTINEL))
+			int audio_only = !strcmp(filename, PHYSICAL_DISC_SENTINEL) && physical_disc_toc_audio_only(&toc);
+			if (!audio_only && !strcmp(filename, PHYSICAL_DISC_SENTINEL))
 			{
 				char save_name[64] = "physical_disc";
 				physical_disc_save_name(PHYSICAL_DISC_DISC_UNKNOWN, save_name, sizeof(save_name));
 				cdi_mount_save(save_name);
 			}
-			else
+			else if (!audio_only)
 			{
 				const char* p = strrchr(filename, '/');
 				int cur_len = p ? p - filename : 0;

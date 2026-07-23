@@ -146,6 +146,7 @@ int mcd_set_image(int num, const char *filename)
 	cdd.status = CD_STAT_OPEN;
 
 	int phys = !strcmp(filename, PHYSICAL_DISC_SENTINEL);
+	int audio_only = 0;
 	physical_disc_region_t disc_region = PHYSICAL_DISC_REGION_UNKNOWN;
 
 	
@@ -154,7 +155,9 @@ int mcd_set_image(int num, const char *filename)
 
 	if (phys && !physical_disc_open(NULL))
 	{
-		disc_region = physical_disc_region();
+		toc_t disc_toc = {};
+		if (!physical_disc_load_toc(&disc_toc)) audio_only = physical_disc_toc_audio_only(&disc_toc);
+		if (!audio_only) disc_region = physical_disc_region();
 		
 
 
@@ -223,7 +226,7 @@ int mcd_set_image(int num, const char *filename)
 			
 
 
-			if (loaded && phys && disc_region != PHYSICAL_DISC_REGION_UNKNOWN)
+			if (loaded && phys && !audio_only && disc_region != PHYSICAL_DISC_REGION_UNKNOWN)
 			{
 				static uint8_t hdr[0x200];
 				physical_disc_region_t bios_region = PHYSICAL_DISC_REGION_UNKNOWN;
@@ -253,13 +256,14 @@ int mcd_set_image(int num, const char *filename)
 		if (cdd.Load(filename) > 0)
 		{
 			mounted = 1;
+			cdd.isData = audio_only ? 0 : 1;
 			cdd.status = cdd.loaded ? CD_STAT_STOP : CD_STAT_NO_DISC;
 			cdd.latency = 10;
 			cdd.SendData = mcd_send_data;
 			cdd.CanSendData = mcd_can_send_data;
 			if (phys) physical_disc_swap_enable(1);   
 
-			if (!same_game)
+			if (!audio_only && !same_game)
 			{
 				if (phys)
 				{

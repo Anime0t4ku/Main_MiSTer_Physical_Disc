@@ -266,11 +266,13 @@ int saturn_set_image(int num, const char *filename)
 	{
 		if (satcdd.Load(filename) > 0)
 		{
+			toc_t disc_toc = {};
+			int audio_only = phys && !physical_disc_current_toc(&disc_toc) && physical_disc_toc_audio_only(&disc_toc);
 			mounted = 1;
 			satcdd.SendData = saturn_send_data;
 			if (phys) physical_disc_swap_enable(1);   
 
-			if (!same_game && reset_after_insert_disc)
+			if (!audio_only && !same_game && reset_after_insert_disc)
 			{
 				
 				
@@ -280,7 +282,7 @@ int saturn_set_image(int num, const char *filename)
 				
 			}
 
-			if (satcdd.GetBootHeader((uint8_t*)buf) > 0)
+			if (!audio_only && satcdd.GetBootHeader((uint8_t*)buf) > 0)
 			{
 				saturn_send_data((uint8_t*)buf, 256, BOOT_IO_INDEX);
 				saturn_apply_disc_hacks(buf + 0x20);

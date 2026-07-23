@@ -773,12 +773,18 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 		if (load_cd_image(filename, &toc) && toc.last)
 		{
 			int reset = 0;
-			game_info_t game_info = psx_get_game_info();
-			const char* game_id = game_info.game_id;
-			region_t region = psx_get_region();
-			if (region == region_t::UNKNOWN)
-				region = game_info.region;
-			printf("Game ID: %s, region: %s\n", game_id, region_string(region));
+			int audio_only = phys && physical_disc_toc_audio_only(&toc);
+			game_info_t game_info = {};
+			const char* game_id = "";
+			region_t region = region_t::UNKNOWN;
+			if (!audio_only)
+			{
+				game_info = psx_get_game_info();
+				game_id = game_info.game_id;
+				region = psx_get_region();
+				if (region == region_t::UNKNOWN) region = game_info.region;
+				printf("Game ID: %s, region: %s\n", game_id, region_string(region));
+			}
 			if (phys) s_swap_region = region;   
 
 			
@@ -799,14 +805,14 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 			const char *name = phys ? disc_name : filename;
 
 			
-			if (game_id && game_id[0] != '\0')
+			if (!audio_only && game_id && game_id[0] != '\0')
 			{
 				user_io_write_gameid(name, 0, game_id);
 			}
 
 			int name_len = strlen(name);
 
-			if (toc.tracks[0].type) 
+			if (!audio_only && toc.tracks[0].type) 
 			{
 				const char *p = strrchr(name, '/');
 				int cur_len = p ? p - name : 0;
@@ -868,28 +874,28 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 
 			uint16_t mask = 0;
 
-			fileTYPE sbi_file = {};
-			bool has_sbi_file = false;
-
-			
-			sprintf(buf, "%s/sbi.zip/%s.sbi", HomeDir(), game_id);
-			has_sbi_file = (FileOpen(&sbi_file, buf, 1));
-
-			if (!has_sbi_file && !phys)
+			if (!audio_only)
 			{
-				
-				strcpy(buf, filename);
-				strcpy((name_len > 4) ? buf + name_len - 4 : buf + name_len, ".sbi");
-				has_sbi_file = (FileOpen(&sbi_file, buf, 1));
-			}
+				fileTYPE sbi_file = {};
+				bool has_sbi_file = false;
+				sprintf(buf, "%s/sbi.zip/%s.sbi", HomeDir(), game_id);
+				has_sbi_file = FileOpen(&sbi_file, buf, 1);
 
-			if (has_sbi_file)
-			{
-				printf("Found SBI file: %s\n", buf);
-				mask = libCryptMask(&sbi_file);
-			}
+				if (!has_sbi_file && !phys)
+				{
+					strcpy(buf, filename);
+					strcpy((name_len > 4) ? buf + name_len - 4 : buf + name_len, ".sbi");
+					has_sbi_file = FileOpen(&sbi_file, buf, 1);
+				}
 
-			process_ss(name, name_len != 0);
+				if (has_sbi_file)
+				{
+					printf("Found SBI file: %s\n", buf);
+					mask = libCryptMask(&sbi_file);
+				}
+
+				process_ss(name, name_len != 0);
+			}
 			send_cue_and_metadata(&toc, mask, region, reset);
 
 			user_io_set_index(f_index);

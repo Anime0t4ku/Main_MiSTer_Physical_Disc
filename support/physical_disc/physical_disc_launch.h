@@ -38,6 +38,10 @@ int physical_disc_launch_busy(void);
 
 void physical_disc_launch_cancel(void);
 
+void physical_disc_launch_reset(void);
+
+int physical_disc_launch_consume_startup_osd_suppression(void);
+
 
 
 int physical_disc_launch_load_disc(void);

@@ -81,6 +81,7 @@ int physical_disc_load_toc(toc_t *toc);
 
 
 int physical_disc_current_toc(toc_t *toc);
+int physical_disc_toc_audio_only(const toc_t *toc);
 
 
 

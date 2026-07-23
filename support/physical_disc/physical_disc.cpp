@@ -1095,6 +1095,16 @@ int physical_disc_load_toc(toc_t *toc)
 
 
 
+int physical_disc_toc_audio_only(const toc_t *toc)
+{
+	if (!toc || toc->last <= 0) return 0;
+	for (int i = 0; i < toc->last; i++)
+	{
+		if (toc->tracks[i].type != TT_CDDA) return 0;
+	}
+	return 1;
+}
+
 int physical_disc_current_toc(toc_t *toc)
 {
 	

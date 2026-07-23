@@ -166,10 +166,12 @@ int p3do_set_image(int num, const char *filename)
 	{
 		if (p3docdd.Load(filename) > 0)
 		{
+			toc_t disc_toc = {};
+			int audio_only = phys && !physical_disc_current_toc(&disc_toc) && physical_disc_toc_audio_only(&disc_toc);
 			mounted = 1;
 			p3docdd.SendData = p3do_send_data;
 
-			if (!same_game)
+			if (!audio_only && !same_game)
 			{
 				
 				char save_name[64] = "physical_disc";

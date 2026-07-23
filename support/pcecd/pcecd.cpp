@@ -182,8 +182,15 @@ static int load_bios(char *biosname, const char *cuename, int sgx)
 		user_io_file_tx_data((uint8_t*)buf, chunk);
 	}
 
-	FileGenerateSavePath(cuename, buf);
-	user_io_file_mount(buf, 0, 1);
+	if (cuename && *cuename)
+	{
+		FileGenerateSavePath(cuename, buf);
+		user_io_file_mount(buf, 0, 1);
+	}
+	else
+	{
+		user_io_file_mount("");
+	}
 
 	user_io_set_download(0);
 	pcecdd.SetRegion(swap | us_cart);
@@ -209,6 +216,8 @@ void pcecd_set_image(int num, const char *filename)
 
 			int sgx = 0;
 			int phys = !strcmp(filename, PHYSICAL_DISC_SENTINEL);
+			toc_t disc_toc = {};
+			int audio_only = phys && !physical_disc_current_toc(&disc_toc) && physical_disc_toc_audio_only(&disc_toc);
 			char save_name[64] = "physical_disc";
 			if (phys) physical_disc_save_name(PHYSICAL_DISC_DISC_PCECD, save_name, sizeof(save_name));
 
@@ -224,13 +233,13 @@ void pcecd_set_image(int num, const char *filename)
 				if (FileExists(buf)) sgx = 1;
 
 				strcpy(p, "cd_bios.rom");
-				loaded = load_bios(buf, phys ? save_name : filename, sgx);
+				loaded = load_bios(buf, audio_only ? "" : (phys ? save_name : filename), sgx);
 			}
 
 			if (!loaded)
 			{
 				sprintf(buf, "%s/cd_bios.rom", HomeDir(PCECD_DIR));
-				loaded = load_bios(buf, phys ? save_name : filename, sgx);
+				loaded = load_bios(buf, audio_only ? "" : (phys ? save_name : filename), sgx);
 			}
 
 			if (!loaded) Info("CD BIOS not found!", 4000);

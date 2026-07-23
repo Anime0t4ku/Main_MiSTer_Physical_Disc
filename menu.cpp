@@ -63,6 +63,7 @@
 #include "joymapping.h"
 #include "recent.h"
 #include "support.h"
+#include "support/physical_disc/physical_disc_launch.h"
 #include "bootcore.h"
 #include "ide.h"
 #include "profiling.h"
@@ -1225,6 +1226,12 @@ void HandleUI(void)
 	{
 		
 		c = menu_key_get();
+	}
+
+	if (mgl->done && physical_disc_launch_consume_startup_osd_suppression())
+	{
+		menustate = MENU_NONE1;
+		OsdDisable();
 	}
 
 	
@@ -2579,7 +2586,11 @@ void HandleUI(void)
 									user_io_status_set(opt, 0, ex);
 
 									menustate = MENU_GENERIC_MAIN1;
-									if (p[0] == 'R' || p[0] == 'r') menustate = MENU_NONE1;
+									if (p[0] == 'R' || p[0] == 'r')
+									{
+										physical_disc_launch_reset();
+										menustate = MENU_NONE1;
+									}
 								}
 							}
 						}

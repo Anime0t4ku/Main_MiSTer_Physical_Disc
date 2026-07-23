@@ -29,6 +29,7 @@ static int p3do_prepare_state = 0;
 static int p3do_prepare_lba = 0;
 static toc_t p3do_prepare_toc;
 static uint8_t p3do_prepare_buf[PHYSICAL_DISC_RAW];
+static int pce_startup_osd_suppression = 0;
 
 static int p3do_sector_ready(const uint8_t *data)
 {
@@ -96,6 +97,8 @@ void physical_disc_launch_startup(void)
 	physical_disc_acoustic_config(cfg.physical_disc_acoustic);
 	const char *name = user_io_get_core_name();
 	if (!name || strncasecmp(name, "CD-", 3)) return;
+
+	pce_startup_osd_suppression = is_pce();
 
 	unsigned int wait_seconds = cfg.physical_disc_mount_delay;
 	if (wait_seconds < 8) wait_seconds = 8;
@@ -224,11 +227,38 @@ int physical_disc_launch_busy(void)
 
 void physical_disc_launch_cancel(void)
 {
+	pce_startup_osd_suppression = 0;
 	if (p3do_prepare_state) physical_disc_close();
 	pending_mount = 0;
 	mount_deadline = 0;
 	p3do_prepare_state = 0;
 	p3do_prepare_timer = 0;
+}
+
+
+void physical_disc_launch_reset(void)
+{
+	const char *name = user_io_get_core_name();
+	if (!name || strncasecmp(name, "CD-", 3)) return;
+
+	physical_disc_launch_cancel();
+	physical_disc_close();
+	physical_disc_acoustic_config(cfg.physical_disc_acoustic);
+
+	unsigned int wait_seconds = cfg.physical_disc_mount_delay;
+	if (wait_seconds < 8) wait_seconds = 8;
+	mount_deadline = GetTimer(wait_seconds * 1000);
+	p3do_prepare_state = 0;
+	p3do_prepare_lba = 0;
+	p3do_prepare_timer = 0;
+	pending_mount = GetTimer(100);
+}
+
+int physical_disc_launch_consume_startup_osd_suppression(void)
+{
+	if (!pce_startup_osd_suppression) return 0;
+	pce_startup_osd_suppression = 0;
+	return 1;
 }
 
 int physical_disc_launch_menu_tick(void)

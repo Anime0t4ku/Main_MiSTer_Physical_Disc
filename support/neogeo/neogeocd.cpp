@@ -148,6 +148,9 @@ int neocd_set_image(const char *filename)
 
 		if (cdd.Load(filename) > 0)
 		{
+			toc_t disc_toc = {};
+			int audio_only = phys && !physical_disc_current_toc(&disc_toc) && physical_disc_toc_audio_only(&disc_toc);
+			cdd.isData = audio_only ? 0 : 1;
 			cdd.status = cdd.loaded ? CD_STAT_STOP : CD_STAT_NO_DISC;
 			cdd.latency = 10;
 			cdd.SendData = neocd_send_data;
