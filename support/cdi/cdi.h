@@ -11,6 +11,7 @@ void cdi_read_cd(uint8_t *buffer, int lba, int cnt);
 int cdi_chd_hunksize();
 const char* cdi_get_game_id();
 void cdi_poll();
+void cdi_unmount_cd();
 void cdi_load_root_nvram();
 
 #endif

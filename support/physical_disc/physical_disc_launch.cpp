@@ -97,6 +97,14 @@ void physical_disc_launch_startup(void)
 	physical_disc_acoustic_config(cfg.physical_disc_acoustic);
 	const char *name = user_io_get_core_name();
 	if (!name || strncasecmp(name, "CD-", 3)) return;
+	if (!strcasecmp(name, "CD-SNES"))
+	{
+		physical_disc_launch_cancel();
+		physical_disc_close();
+		pending_mount = 0;
+		mount_deadline = 0;
+		return;
+	}
 	physical_disc_prepare_environment();
 
 	pce_startup_osd_suppression = is_pce();
@@ -240,7 +248,7 @@ void physical_disc_launch_cancel(void)
 void physical_disc_launch_reset(void)
 {
 	const char *name = user_io_get_core_name();
-	if (!name || strncasecmp(name, "CD-", 3)) return;
+	if (!name || strncasecmp(name, "CD-", 3) || !strcasecmp(name, "CD-SNES")) return;
 
 	physical_disc_launch_cancel();
 	physical_disc_close();

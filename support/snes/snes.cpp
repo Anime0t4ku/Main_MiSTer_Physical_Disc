@@ -5,10 +5,20 @@
 #include <inttypes.h>
 #include <limits.h>
 #include <glob.h>
+#include <pthread.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <time.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <sys/mount.h>
+#include <sys/ioctl.h>
+#include <linux/cdrom.h>
 
 #include "../../file_io.h"
 #include "../../user_io.h"
 #include "../../spi.h"
+#include "../../hardware.h"
 
 static uint8_t hdr[512];
 
@@ -478,6 +488,273 @@ static uint8_t buf[1024];
 static char has_cd = 0;
 static fileTYPE f_audio = {};
 
+
+#define CD_SNES_BUFFER_SIZE (2 * 1024 * 1024)
+#define CD_SNES_PREFILL_SIZE (512 * 1024)
+
+struct cd_snes_stream_t
+{
+	pthread_t thread;
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	uint8_t *buffer;
+	int fd;
+	uint64_t size;
+	uint64_t read_pos;
+	uint64_t write_pos;
+	uint32_t generation;
+	int running;
+	int stop;
+	int eof;
+};
+
+static cd_snes_stream_t cd_snes_stream = {};
+static int cd_snes_state = 0;
+static int cd_snes_drive = -1;
+static const char cd_snes_mount_path[] = "/tmp/cd-snes";
+
+static int cd_snes_active(void)
+{
+	const char *name = user_io_get_core_name();
+	return name && !strcmp(name, "CD-SNES");
+}
+
+static int cd_snes_streaming_active(void)
+{
+	return cd_snes_state == 2 && !strncmp(SelectedPath, cd_snes_mount_path, sizeof(cd_snes_mount_path) - 1);
+}
+
+static void *cd_snes_stream_worker(void *)
+{
+	uint8_t temp[64 * 1024];
+	while (1)
+	{
+		pthread_mutex_lock(&cd_snes_stream.lock);
+		while (!cd_snes_stream.stop && (cd_snes_stream.eof || cd_snes_stream.write_pos - cd_snes_stream.read_pos >= CD_SNES_BUFFER_SIZE - sizeof(temp)))
+			pthread_cond_wait(&cd_snes_stream.cond, &cd_snes_stream.lock);
+		if (cd_snes_stream.stop)
+		{
+			pthread_mutex_unlock(&cd_snes_stream.lock);
+			break;
+		}
+		uint64_t offset = cd_snes_stream.write_pos;
+		uint32_t generation = cd_snes_stream.generation;
+		uint64_t remaining = cd_snes_stream.size > offset ? cd_snes_stream.size - offset : 0;
+		size_t length = remaining > sizeof(temp) ? sizeof(temp) : remaining;
+		pthread_mutex_unlock(&cd_snes_stream.lock);
+		if (!length)
+		{
+			pthread_mutex_lock(&cd_snes_stream.lock);
+			if (generation == cd_snes_stream.generation) cd_snes_stream.eof = 1;
+			pthread_cond_broadcast(&cd_snes_stream.cond);
+			pthread_mutex_unlock(&cd_snes_stream.lock);
+			continue;
+		}
+		ssize_t count = pread(cd_snes_stream.fd, temp, length, offset);
+		pthread_mutex_lock(&cd_snes_stream.lock);
+		if (generation == cd_snes_stream.generation && offset == cd_snes_stream.write_pos)
+		{
+			if (count > 0)
+			{
+				size_t pos = offset % CD_SNES_BUFFER_SIZE;
+				size_t first = count;
+				if (first > CD_SNES_BUFFER_SIZE - pos) first = CD_SNES_BUFFER_SIZE - pos;
+				memcpy(cd_snes_stream.buffer + pos, temp, first);
+				if ((size_t)count > first) memcpy(cd_snes_stream.buffer, temp + first, count - first);
+				cd_snes_stream.write_pos += count;
+			}
+			else if (!count) cd_snes_stream.eof = 1;
+		}
+		pthread_cond_broadcast(&cd_snes_stream.cond);
+		pthread_mutex_unlock(&cd_snes_stream.lock);
+		if (count < 0) usleep(2000);
+	}
+	return NULL;
+}
+
+static void cd_snes_stream_stop(void)
+{
+	if (!cd_snes_stream.running) return;
+	pthread_mutex_lock(&cd_snes_stream.lock);
+	cd_snes_stream.stop = 1;
+	pthread_cond_broadcast(&cd_snes_stream.cond);
+	pthread_mutex_unlock(&cd_snes_stream.lock);
+	pthread_join(cd_snes_stream.thread, NULL);
+	if (cd_snes_stream.fd >= 0) close(cd_snes_stream.fd);
+	free(cd_snes_stream.buffer);
+	pthread_cond_destroy(&cd_snes_stream.cond);
+	pthread_mutex_destroy(&cd_snes_stream.lock);
+	memset(&cd_snes_stream, 0, sizeof(cd_snes_stream));
+	cd_snes_stream.fd = -1;
+}
+
+static int cd_snes_stream_wait(size_t amount, int timeout_ms)
+{
+	struct timespec deadline;
+	clock_gettime(CLOCK_REALTIME, &deadline);
+	deadline.tv_sec += timeout_ms / 1000;
+	deadline.tv_nsec += (timeout_ms % 1000) * 1000000;
+	if (deadline.tv_nsec >= 1000000000)
+	{
+		deadline.tv_sec++;
+		deadline.tv_nsec -= 1000000000;
+	}
+	pthread_mutex_lock(&cd_snes_stream.lock);
+	while (!cd_snes_stream.stop && !cd_snes_stream.eof && cd_snes_stream.write_pos - cd_snes_stream.read_pos < amount)
+	{
+		if (pthread_cond_timedwait(&cd_snes_stream.cond, &cd_snes_stream.lock, &deadline) == ETIMEDOUT) break;
+	}
+	int ready = cd_snes_stream.write_pos > cd_snes_stream.read_pos;
+	pthread_mutex_unlock(&cd_snes_stream.lock);
+	return ready;
+}
+
+static int cd_snes_stream_start(const char *path, uint64_t offset)
+{
+	cd_snes_stream_stop();
+	int fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0) return 0;
+	struct stat st = {};
+	if (fstat(fd, &st) || offset > (uint64_t)st.st_size)
+	{
+		close(fd);
+		return 0;
+	}
+	uint8_t *buffer = (uint8_t*)malloc(CD_SNES_BUFFER_SIZE);
+	if (!buffer)
+	{
+		close(fd);
+		return 0;
+	}
+	memset(&cd_snes_stream, 0, sizeof(cd_snes_stream));
+	cd_snes_stream.buffer = buffer;
+	cd_snes_stream.fd = fd;
+	cd_snes_stream.size = st.st_size;
+	cd_snes_stream.read_pos = offset;
+	cd_snes_stream.write_pos = offset;
+	cd_snes_stream.generation = 1;
+	pthread_mutex_init(&cd_snes_stream.lock, NULL);
+	pthread_cond_init(&cd_snes_stream.cond, NULL);
+	if (pthread_create(&cd_snes_stream.thread, NULL, cd_snes_stream_worker, NULL))
+	{
+		close(fd);
+		free(buffer);
+		pthread_cond_destroy(&cd_snes_stream.cond);
+		pthread_mutex_destroy(&cd_snes_stream.lock);
+		memset(&cd_snes_stream, 0, sizeof(cd_snes_stream));
+		cd_snes_stream.fd = -1;
+		return 0;
+	}
+	cd_snes_stream.running = 1;
+	return cd_snes_stream_wait(CD_SNES_PREFILL_SIZE, 5000);
+}
+
+static int cd_snes_stream_seek(uint64_t offset)
+{
+	if (!cd_snes_stream.running || offset > cd_snes_stream.size) return 0;
+	pthread_mutex_lock(&cd_snes_stream.lock);
+	cd_snes_stream.read_pos = offset;
+	cd_snes_stream.write_pos = offset;
+	cd_snes_stream.generation++;
+	cd_snes_stream.eof = 0;
+	pthread_cond_broadcast(&cd_snes_stream.cond);
+	pthread_mutex_unlock(&cd_snes_stream.lock);
+	return cd_snes_stream_wait(CD_SNES_PREFILL_SIZE, 5000);
+}
+
+static int cd_snes_stream_read(void *data, size_t length)
+{
+	if (!cd_snes_stream.running) return 0;
+	memset(data, 0, length);
+	struct timespec deadline;
+	clock_gettime(CLOCK_REALTIME, &deadline);
+	deadline.tv_nsec += 100000000;
+	if (deadline.tv_nsec >= 1000000000)
+	{
+		deadline.tv_sec++;
+		deadline.tv_nsec -= 1000000000;
+	}
+	pthread_mutex_lock(&cd_snes_stream.lock);
+	while (!cd_snes_stream.stop && !cd_snes_stream.eof && cd_snes_stream.write_pos - cd_snes_stream.read_pos < length)
+	{
+		if (pthread_cond_timedwait(&cd_snes_stream.cond, &cd_snes_stream.lock, &deadline) == ETIMEDOUT) break;
+	}
+	size_t available = cd_snes_stream.write_pos - cd_snes_stream.read_pos;
+	if (available > length) available = length;
+	if (available)
+	{
+		size_t pos = cd_snes_stream.read_pos % CD_SNES_BUFFER_SIZE;
+		size_t first = available;
+		if (first > CD_SNES_BUFFER_SIZE - pos) first = CD_SNES_BUFFER_SIZE - pos;
+		memcpy(data, cd_snes_stream.buffer + pos, first);
+		if (available > first) memcpy((uint8_t*)data + first, cd_snes_stream.buffer, available - first);
+		cd_snes_stream.read_pos += available;
+		pthread_cond_broadcast(&cd_snes_stream.cond);
+	}
+	pthread_mutex_unlock(&cd_snes_stream.lock);
+	return available;
+}
+
+static int cd_snes_name_compare(const void *a, const void *b)
+{
+	return strcasecmp((const char*)a, (const char*)b);
+}
+
+static int cd_snes_find_rom(char *path, size_t size)
+{
+	DIR *dir = opendir(cd_snes_mount_path);
+	if (!dir) return 0;
+	char names[64][NAME_MAX + 1];
+	int count = 0;
+	struct dirent *entry;
+	while ((entry = readdir(dir)) && count < 64)
+	{
+		const char *ext = strrchr(entry->d_name, '.');
+		if (!ext || (strcasecmp(ext, ".sfc") && strcasecmp(ext, ".smc"))) continue;
+		strncpy(names[count], entry->d_name, NAME_MAX);
+		names[count][NAME_MAX] = 0;
+		count++;
+	}
+	closedir(dir);
+	if (!count) return 0;
+	qsort(names, count, sizeof(names[0]), cd_snes_name_compare);
+	snprintf(path, size, "%s/%s", cd_snes_mount_path, names[0]);
+	return 1;
+}
+
+static int cd_snes_open_disc(char *rom, size_t size)
+{
+	mkdir(cd_snes_mount_path, 0755);
+	umount2(cd_snes_mount_path, MNT_DETACH);
+	char device[32] = {};
+	for (int i = 0; i < 8; i++)
+	{
+		snprintf(device, sizeof(device), "/dev/sr%d", i);
+		if (!access(device, R_OK)) break;
+		device[0] = 0;
+	}
+	if (!device[0]) return 0;
+	if (mount(device, cd_snes_mount_path, "iso9660", MS_RDONLY | MS_NOSUID | MS_NODEV, "iocharset=utf8") &&
+		mount(device, cd_snes_mount_path, "iso9660", MS_RDONLY | MS_NOSUID | MS_NODEV, NULL)) return 0;
+	cd_snes_drive = open(device, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+	if (cd_snes_drive >= 0) ioctl(cd_snes_drive, CDROM_SELECT_SPEED, 0);
+	return cd_snes_find_rom(rom, size);
+}
+
+static void cd_snes_close_disc(void)
+{
+	cd_snes_stream_stop();
+	FileClose(&f_audio);
+	if (cd_snes_drive >= 0)
+	{
+		ioctl(cd_snes_drive, CDROM_SELECT_SPEED, 4);
+		close(cd_snes_drive);
+		cd_snes_drive = -1;
+	}
+	umount2(cd_snes_mount_path, MNT_DETACH);
+	cd_snes_state = 0;
+}
+
 static void msu_send_command(uint64_t cmd)
 {
 	spi_uio_cmd_cont(UIO_CD_SET);
@@ -492,7 +769,8 @@ static int msu_send_data(fileTYPE *f, int idx)
 	int chunk = sizeof(buf);
 
 	memset(buf, 0, chunk);
-	if (f->size) FileReadAdv(f, buf, chunk);
+	if (cd_snes_streaming_active() && cd_snes_stream.running) cd_snes_stream_read(buf, chunk);
+	else if (f->size) FileReadAdv(f, buf, chunk);
 
 	user_io_set_index(idx);
 	user_io_set_download(1);
@@ -505,6 +783,7 @@ static int msu_send_data(fileTYPE *f, int idx)
 void snes_msu_init(const char* name)
 {
 	static fileTYPE f = {};
+	cd_snes_stream_stop();
 	FileClose(&f_audio);
 
 	memset(snes_romFileName, 0, 1024);
@@ -526,6 +805,26 @@ void snes_msu_init(const char* name)
 	}
 
 	msu_send_command((has_cd << 15) | MSU_CD_SET);
+}
+
+void snes_cd_session_poll(void)
+{
+	if (!cd_snes_active())
+	{
+		if (cd_snes_state) cd_snes_close_disc();
+		return;
+	}
+	if (cd_snes_state) return;
+	cd_snes_state = 1;
+	char rom[PATH_MAX] = {};
+	if (!cd_snes_open_disc(rom, sizeof(rom)))
+	{
+		cd_snes_close_disc();
+		cd_snes_state = -1;
+		return;
+	}
+	cd_snes_state = 2;
+	if (!user_io_file_tx(rom, 0, 1, 0, 0, 0)) cd_snes_close_disc();
 }
 
 void snes_poll(void)
@@ -554,14 +853,17 @@ void snes_poll(void)
 			snprintf(SelectedPath, sizeof(SelectedPath), "%s-%d.pcm", snes_romFileName, data);
 			printf("MSU: New track selected: %s\n", SelectedPath);
 			FileOpen(&f_audio, SelectedPath);
+			if (cd_snes_streaming_active() && f_audio.size) cd_snes_stream_start(SelectedPath, 0);
 			printf(f_audio.size ? "MSU: Track mounted\n" : "MSU: Track not found!\n");
 			msu_send_command((f_audio.size << 16) | MSU_AUDIO_TRACK_MOUNTED);
 			break;
 
 		case 0x36:
 			printf("MSU: Jump to offset: 0x%X\n", data * 1024);
-			FileSeek(&f_audio, data * 1024, SEEK_SET);
-			// fallthrough
+			if (cd_snes_streaming_active() && cd_snes_stream.running) cd_snes_stream_seek((uint64_t)data * 1024);
+			else FileSeek(&f_audio, data * 1024, SEEK_SET);
+			msu_send_data(&f_audio, 2);
+			break;
 
 		case 0x34:
 			// Next sector requested

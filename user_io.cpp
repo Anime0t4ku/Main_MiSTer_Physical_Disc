@@ -3175,6 +3175,8 @@ void user_io_poll()
 	}
 
 	
+	snes_cd_session_poll();
+
 	if (is_x86() || is_pcxt())
 	{
 		x86_poll(0);

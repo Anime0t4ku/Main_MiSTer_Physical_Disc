@@ -402,7 +402,6 @@ static int load_physical_cd(toc_t* table)
 		table->tracks[i].indexes[1] = i ? 0 : 150;
 	}
 	table->end += 150;
-	physical_disc_prewarm_blocking();
 	return 1;
 }
 
