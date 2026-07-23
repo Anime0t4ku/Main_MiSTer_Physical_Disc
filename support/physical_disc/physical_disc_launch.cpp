@@ -97,6 +97,7 @@ void physical_disc_launch_startup(void)
 	physical_disc_acoustic_config(cfg.physical_disc_acoustic);
 	const char *name = user_io_get_core_name();
 	if (!name || strncasecmp(name, "CD-", 3)) return;
+	physical_disc_prepare_environment();
 
 	pce_startup_osd_suppression = is_pce();
 

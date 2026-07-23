@@ -39,12 +39,15 @@
 
 
 
+void physical_disc_prepare_environment(void);
+
 void physical_disc_set_device(const char *dev);
 
 
 
 
 int physical_disc_open(const char *dev);
+void physical_disc_native_speed(int enable);
 
 
 int physical_disc_disc_present();

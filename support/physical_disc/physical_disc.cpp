@@ -164,9 +164,10 @@ static struct {
 	volatile int prewarm;         
 	volatile int prewarm_end;     
 	volatile int swap_ejected;    
+	volatile int native_speed;
 } pcd = { -1, 0, -1, -1, {}, 0, NULL, {0,0}, {0,0}, 0, 0, 0,
 	  PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
-	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, -1, -1, 0, 0 };
+	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, -1, -1, 0, 0, 0 };
 
 
 
@@ -207,11 +208,24 @@ static double now_ms()
 static void set_speed_cap()
 {
 	if (pcd.fd < 0) return;
-	if (ioctl(pcd.fd, CDROM_SELECT_SPEED, PHYSICAL_DISC_SPEED_NX) < 0)
-		printf("DISC: speed cap not supported, drive keeps its default\n");
+
+	int audio = 0;
+	for (int i = 0; i < pcd.ntrk; i++)
+		if (pcd.trk[i].audio) audio = 1;
+
+	int speed = pcd.native_speed && pcd.ntrk > 0 && !audio ? 0 : PHYSICAL_DISC_SPEED_NX;
+	if (ioctl(pcd.fd, CDROM_SELECT_SPEED, speed) < 0)
+		printf("DISC: speed selection not supported, drive keeps its default\n");
+	else if (speed)
+		printf("DISC: speed capped at %dx (~%d KB/s, need 172)\n", speed, speed * 177);
 	else
-		printf("DISC: speed capped at %dx (~%d KB/s, need 172)\n",
-			PHYSICAL_DISC_SPEED_NX, PHYSICAL_DISC_SPEED_NX * 177);
+		printf("DISC: native drive speed enabled\n");
+}
+
+void physical_disc_native_speed(int enable)
+{
+	pcd.native_speed = enable ? 1 : 0;
+	if (pcd.fd >= 0 && pcd.ntrk > 0) set_speed_cap();
 }
 
 
@@ -232,13 +246,52 @@ static void quiet_block_probes(const char *dev)
 	name = name ? name + 1 : dev;
 
 	char path[128];
+	FILE *f;
+
 	snprintf(path, sizeof(path), "/sys/block/%s/queue/read_ahead_kb", name);
-	FILE *f = fopen(path, "w");
-	if (f) {
+	if ((f = fopen(path, "w")))
+	{
 		fputs("0", f);
 		fclose(f);
-		printf("DISC: block readahead off for %s (kernel disc probes fail fast now)\n", name);
 	}
+
+	snprintf(path, sizeof(path), "/sys/block/%s/events_poll_msecs", name);
+	if ((f = fopen(path, "w")))
+	{
+		fputs("-1", f);
+		fclose(f);
+	}
+}
+
+static void install_physical_disc_rule(void)
+{
+	static const char *path = "/etc/udev/rules.d/59-physical-disc-cdrom.rules";
+	static const char *rule =
+		"ACTION!=\"remove\", KERNEL==\"sr[0-9]*\", ENV{UDEV_DISABLE_PERSISTENT_STORAGE_RULES_FLAG}=\"1\"\n";
+
+	size_t rule_len = strlen(rule);
+	char current[256] = {};
+	FILE *f = fopen(path, "r");
+	if (f)
+	{
+		size_t read_len = fread(current, 1, sizeof(current) - 1, f);
+		fclose(f);
+		if (read_len == rule_len && !memcmp(current, rule, rule_len)) return;
+	}
+
+	f = fopen(path, "w");
+	if (!f) return;
+	fputs(rule, f);
+	fflush(f);
+	fsync(fileno(f));
+	fclose(f);
+
+	system("export PATH=/usr/sbin:/sbin:/usr/bin:/bin:$PATH; udevadm control --reload-rules 2>/dev/null || udevadm control --reload 2>/dev/null");
+}
+
+void physical_disc_prepare_environment(void)
+{
+	install_physical_disc_rule();
 }
 
 
@@ -1694,5 +1747,6 @@ void physical_disc_close()
 	pcd.leadout = 0;
 	pcd.ntrk = 0;
 	pcd.first_data_lba = -1;
+	pcd.native_speed = 0;
 	cur_dev[0] = 0;
 }

@@ -358,7 +358,14 @@ static int load_physical_cd(toc_t* table)
 {
 	unload_cue(table);
 	unload_chd(table);
-	if (physical_disc_open(NULL) || physical_disc_load_toc(table))
+	if (physical_disc_open(NULL))
+	{
+		physical_disc_close();
+		return 0;
+	}
+
+	physical_disc_native_speed(1);
+	if (physical_disc_load_toc(table))
 	{
 		physical_disc_close();
 		return 0;
