@@ -791,8 +791,10 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 			static char disc_name[64];
 			if (phys)
 			{
+				char save_name[64] = "physical_disc";
+				physical_disc_save_name(PHYSICAL_DISC_DISC_PSX, save_name, sizeof(save_name));
 				snprintf(disc_name, sizeof(disc_name), "%s",
-					(game_id && game_id[0]) ? game_id : "physical_disc");
+					(game_id && game_id[0]) ? game_id : save_name);
 			}
 			const char *name = phys ? disc_name : filename;
 

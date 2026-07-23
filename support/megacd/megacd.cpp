@@ -265,7 +265,9 @@ int mcd_set_image(int num, const char *filename)
 				{
 					
 
-					mcd_mount_save("physical_disc.sav");
+					char save_name[64] = "physical_disc";
+					physical_disc_save_name(PHYSICAL_DISC_DISC_MEGACD, save_name, sizeof(save_name));
+					mcd_mount_save(save_name);
 				}
 				else
 				{

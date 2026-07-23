@@ -274,7 +274,9 @@ int saturn_set_image(int num, const char *filename)
 			{
 				
 				
-				saturn_mount_save(phys ? "physical_disc" : filename, true);
+				char save_name[64] = "physical_disc";
+				if (phys) physical_disc_save_name(PHYSICAL_DISC_DISC_SATURN, save_name, sizeof(save_name));
+				saturn_mount_save(phys ? save_name : filename, true);
 				
 			}
 

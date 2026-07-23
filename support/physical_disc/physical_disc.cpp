@@ -1451,6 +1451,101 @@ int physical_disc_disc_serial(char *out, int outsz)
 }
 
 
+static int physical_disc_sanitize_name(const char *src, int len, char *out, int outsz)
+{
+	if (!src || !out || outsz < 2) return 0;
+	int n = 0;
+	int pending = 0;
+	for (int i = 0; i < len && src[i]; i++)
+	{
+		unsigned char c = (unsigned char)src[i];
+		if (c == ' ' || c == '_' || c == '/' || c == '\\' || c == ':' || c == ';' || c == ',')
+		{
+			if (n) pending = 1;
+			continue;
+		}
+		if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '-' || c == '.')) continue;
+		if (pending && n < outsz - 1) out[n++] = '_';
+		pending = 0;
+		if (n < outsz - 1) out[n++] = (char)c;
+	}
+	while (n && (out[n - 1] == '_' || out[n - 1] == '.')) n--;
+	out[n] = 0;
+	return n;
+}
+
+static uint64_t physical_disc_hash64(uint64_t h, uint64_t v)
+{
+	for (int i = 0; i < 8; i++)
+	{
+		h ^= (uint8_t)(v >> (i * 8));
+		h *= 1099511628211ULL;
+	}
+	return h;
+}
+
+static int physical_disc_toc_uuid(physical_disc_disc_t type, char *out, int outsz)
+{
+	if (!out || outsz < 37) return 0;
+	toc_t toc;
+	if (physical_disc_current_toc(&toc) || !toc.last)
+	{
+		if (physical_disc_load_toc(&toc) || !toc.last) return 0;
+	}
+	uint64_t h1 = 1469598103934665603ULL;
+	uint64_t h2 = 1099511628211ULL;
+	h1 = physical_disc_hash64(h1, (uint64_t)type);
+	h2 = physical_disc_hash64(h2, (uint64_t)type ^ 0x9E3779B97F4A7C15ULL);
+	h1 = physical_disc_hash64(h1, (uint64_t)toc.last);
+	h2 = physical_disc_hash64(h2, (uint64_t)toc.end);
+	for (int i = 0; i < toc.last; i++)
+	{
+		uint64_t v = ((uint64_t)(uint32_t)toc.tracks[i].start << 32) |
+			((uint64_t)(uint16_t)toc.tracks[i].type << 16) |
+			(uint16_t)(toc.tracks[i].end - toc.tracks[i].start);
+		h1 = physical_disc_hash64(h1, v);
+		h2 = physical_disc_hash64(h2, v ^ ((uint64_t)i << 56));
+	}
+	uint8_t b[16];
+	for (int i = 0; i < 8; i++) b[i] = (uint8_t)(h1 >> (56 - i * 8));
+	for (int i = 0; i < 8; i++) b[8 + i] = (uint8_t)(h2 >> (56 - i * 8));
+	b[6] = (b[6] & 0x0F) | 0x50;
+	b[8] = (b[8] & 0x3F) | 0x80;
+	snprintf(out, outsz,
+		"%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+		b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+		b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
+	return 36;
+}
+
+int physical_disc_save_name(physical_disc_disc_t type, char *out, int outsz)
+{
+	if (!out || outsz < 2) return 0;
+	out[0] = 0;
+	uint8_t user[2048];
+	char id[64] = {};
+	if (pcd.first_data_lba < 0)
+	{
+		toc_t toc;
+		if (physical_disc_load_toc(&toc) || pcd.first_data_lba < 0) return physical_disc_toc_uuid(type, out, outsz);
+	}
+	if (type == PHYSICAL_DISC_DISC_PSX)
+	{
+		if (physical_disc_disc_serial(id, sizeof(id)) && physical_disc_sanitize_name(id, strlen(id), out, outsz)) return strlen(out);
+	}
+	else if (type == PHYSICAL_DISC_DISC_SATURN && !physical_disc_read_data2048(pcd.first_data_lba, user))
+	{
+		if (!memcmp(user, "SEGA SEGASATURN", 15) && physical_disc_sanitize_name((char *)user + 0x20, 10, out, outsz)) return strlen(out);
+	}
+	else if (type == PHYSICAL_DISC_DISC_MEGACD && !physical_disc_read_data2048(pcd.first_data_lba, user))
+	{
+		if (!memcmp(user, "SEGADISCSYSTEM", 14) && physical_disc_sanitize_name((char *)user + 0x180, 14, out, outsz)) return strlen(out);
+	}
+	if (physical_disc_disc_label(id, sizeof(id)) && physical_disc_sanitize_name(id, strlen(id), out, outsz)) return strlen(out);
+	return physical_disc_toc_uuid(type, out, outsz);
+}
+
+
 const char *physical_disc_console_name(physical_disc_disc_t t)
 {
 	switch (t) {

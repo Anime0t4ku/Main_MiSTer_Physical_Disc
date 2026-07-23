@@ -1284,7 +1284,9 @@ int neogeo_romset_tx(char* name, int cd_en)
 	notify_conf();
 
 	
-	FileGenerateSavePath(phys ? "physical_disc" : name, (char*)full_path);
+	char save_name[64] = "physical_disc";
+	if (phys) physical_disc_save_name(PHYSICAL_DISC_DISC_NEOGEO, save_name, sizeof(save_name));
+	FileGenerateSavePath(phys ? save_name : name, (char*)full_path);
 	user_io_file_mount((char*)full_path, 0, 1);
 
 	user_io_status_set("[0]", 0); 

@@ -10,6 +10,7 @@
 #include "../../hardware.h"
 #include "../../menu.h"
 #include "pcecd.h"
+#include "../physical_disc/physical_disc.h"
 
 
 static int need_reset=0;
@@ -207,6 +208,9 @@ void pcecd_set_image(int num, const char *filename)
 			pcecdd.SendData = pcecd_send_data;
 
 			int sgx = 0;
+			int phys = !strcmp(filename, PHYSICAL_DISC_SENTINEL);
+			char save_name[64] = "physical_disc";
+			if (phys) physical_disc_save_name(PHYSICAL_DISC_DISC_PCECD, save_name, sizeof(save_name));
 
 			
 			strcpy(buf, filename);
@@ -220,13 +224,13 @@ void pcecd_set_image(int num, const char *filename)
 				if (FileExists(buf)) sgx = 1;
 
 				strcpy(p, "cd_bios.rom");
-				loaded = load_bios(buf, filename, sgx);
+				loaded = load_bios(buf, phys ? save_name : filename, sgx);
 			}
 
 			if (!loaded)
 			{
 				sprintf(buf, "%s/cd_bios.rom", HomeDir(PCECD_DIR));
-				loaded = load_bios(buf, filename, sgx);
+				loaded = load_bios(buf, phys ? save_name : filename, sgx);
 			}
 
 			if (!loaded) Info("CD BIOS not found!", 4000);

@@ -172,7 +172,9 @@ int p3do_set_image(int num, const char *filename)
 			if (!same_game)
 			{
 				
-				p3do_mount_save(phys ? "physical_disc" : filename);
+				char save_name[64] = "physical_disc";
+				if (phys) physical_disc_save_name(PHYSICAL_DISC_DISC_3DO, save_name, sizeof(save_name));
+				p3do_mount_save(phys ? save_name : filename);
 			}
 
 			if (p3docdd.GetDiscInfo((uint8_t*)buf) > 0)
