@@ -1,37 +1,7 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
-#include <climits>        
+#include <climits>
 #include <fcntl.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -40,61 +10,60 @@
 #include <linux/cdrom.h>
 #include <scsi/sg.h>
 
-#include "physical_disc.h"        
+#include "physical_disc.h"
 #include "physical_disc_acoustic.h"
 
-#define ACTIVE_MS       600       
-#define DEEP_IDLE_MS    4000      
-#define JUMP_THRESHOLD  90        
-#define KEEPALIVE_MS    400       
-#define SAMPLE_MS       200       
-#define MIN_BURST       2         
-#define MAX_BURST       32        
-#define READ_GUARD      32        
-#define READ_GIVEUP     6         
-#define REOPEN_GIVEUP   8         
-#define GAME_LBA_MAX    360000    
-#define SPEED_MIN       2         
-#define SPEED_MAX       12        
-#define SPEED_STEP      2         
-#define SPEED_DEBOUNCE_MS 300     
-#define SEEK_TIMEOUT_MS 4000
-#define READ_TIMEOUT_MS 4000
+#define ACTIVITY_WINDOW_MS       600
+#define SPINDOWN_IDLE_MS         4000
+#define REPOSITION_JUMP          90
+#define IDLE_SEEK_PERIOD_MS      400
+#define RATE_SAMPLE_MS           200
+#define BURST_MIN                2
+#define BURST_MAX                32
+#define END_GUARD_SECTORS        32
+#define READ_FAIL_LIMIT          6
+#define REOPEN_FAIL_LIMIT        8
+#define SEEK_FAIL_LIMIT          4
+#define GAME_SPAN_MAX            360000
+#define DRIVE_SPEED_MIN          2
+#define DRIVE_SPEED_MAX          12
+#define DRIVE_SPEED_STEP         2
+#define SPEED_CHANGE_DEBOUNCE_MS 300
+#define SEEK_CMD_TIMEOUT_MS      4000
+#define READ_CMD_TIMEOUT_MS      4000
 
-static struct {
-	volatile int enabled;
-	volatile int paused;
-	volatile int running;
-	volatile int unsupported;      
-	volatile int read_unsupported; 
-	volatile int target_lba;
-	volatile unsigned seq;         
-	int fd;                        
-	int prop_max;                  
-	int read_lo, read_hi;          
-	pthread_t thread;
-} ac = { 0, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0 };
+typedef struct {
+	volatile int on;
+	volatile int held;
+	volatile int alive;
+	volatile int disabled_perm;
+	volatile int no_read;
+	volatile int game_pos;
+	volatile unsigned touch_count;
+	int dev_fd;
+	int disc_span;
+	int span_lo, span_hi;
+	pthread_t worker;
+} decoy_state_t;
 
+static decoy_state_t decoy = { 0, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0 };
 
+static uint8_t burst_buf[BURST_MAX * 2048];
 
-static uint8_t rbuf[MAX_BURST * 2048];
-
-static double now_ms(void)
+static double clock_ms(void)
 {
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
 }
 
-
-
-static int sg_seek(int fd, int lba)
+static int decoy_seek(int fd, int lba)
 {
 	uint8_t cdb[10] = { 0 };
 	uint8_t sense[32];
 	struct sg_io_hdr io;
 
-	cdb[0] = 0x2B;                 
+	cdb[0] = 0x2B;
 	cdb[2] = (lba >> 24) & 0xFF;
 	cdb[3] = (lba >> 16) & 0xFF;
 	cdb[4] = (lba >> 8) & 0xFF;
@@ -107,24 +76,20 @@ static int sg_seek(int fd, int lba)
 	io.dxfer_direction = SG_DXFER_NONE;
 	io.sbp = sense;
 	io.mx_sb_len = sizeof(sense);
-	io.timeout = SEEK_TIMEOUT_MS;
+	io.timeout = SEEK_CMD_TIMEOUT_MS;
 
 	if (ioctl(fd, SG_IO, &io) < 0) return -1;
 	if (io.status || io.host_status || io.driver_status) return -2;
 	return 0;
 }
 
-
-
-
-
-static int sg_read10(int fd, int lba, int blocks)
+static int decoy_read(int fd, int lba, int blocks)
 {
 	uint8_t cdb[10] = { 0 };
 	uint8_t sense[32];
 	struct sg_io_hdr io;
 
-	cdb[0] = 0x28;                 
+	cdb[0] = 0x28;
 	cdb[2] = (lba >> 24) & 0xFF;
 	cdb[3] = (lba >> 16) & 0xFF;
 	cdb[4] = (lba >> 8) & 0xFF;
@@ -138,27 +103,25 @@ static int sg_read10(int fd, int lba, int blocks)
 	io.cmdp = cdb;
 	io.dxfer_direction = SG_DXFER_FROM_DEV;
 	io.dxfer_len = blocks * 2048;
-	io.dxferp = rbuf;
+	io.dxferp = burst_buf;
 	io.sbp = sense;
 	io.mx_sb_len = sizeof(sense);
-	io.timeout = READ_TIMEOUT_MS;
+	io.timeout = READ_CMD_TIMEOUT_MS;
 
 	if (ioctl(fd, SG_IO, &io) < 0) return -1;
 	if (io.status || io.host_status || io.driver_status) return -2;
 	return 0;
 }
 
-
-
-static void sg_start_stop(int fd, int start)
+static void decoy_spin(int fd, int start)
 {
 	uint8_t cdb[6] = { 0 };
 	uint8_t sense[32];
 	struct sg_io_hdr io;
 
-	cdb[0] = 0x1B;                 
-	cdb[1] = 0x01;                 
-	cdb[4] = start ? 0x01 : 0x00;  
+	cdb[0] = 0x1B;
+	cdb[1] = 0x01;
+	cdb[4] = start ? 0x01 : 0x00;
 
 	memset(&io, 0, sizeof(io));
 	io.interface_id = 'S';
@@ -167,39 +130,29 @@ static void sg_start_stop(int fd, int start)
 	io.dxfer_direction = SG_DXFER_NONE;
 	io.sbp = sense;
 	io.mx_sb_len = sizeof(sense);
-	io.timeout = SEEK_TIMEOUT_MS;
+	io.timeout = SEEK_CMD_TIMEOUT_MS;
 
 	ioctl(fd, SG_IO, &io);
 }
 
-
-
-
-
-static void set_speed(int fd, int nx)
+static void decoy_set_speed(int fd, int nx)
 {
 	ioctl(fd, CDROM_SELECT_SPEED, nx);
 }
 
-
-
-
-static int map_lba(int game_lba)
+static int project_lba(int game_lba)
 {
-	int lo = ac.read_lo, hi = ac.read_hi;
+	int lo = decoy.span_lo, hi = decoy.span_hi;
 	if (hi <= lo) return lo;
 	if (game_lba < 0) game_lba = 0;
-	if (game_lba > GAME_LBA_MAX) game_lba = GAME_LBA_MAX;
-	int p = lo + (int)((int64_t)game_lba * (hi - lo) / GAME_LBA_MAX);
+	if (game_lba > GAME_SPAN_MAX) game_lba = GAME_SPAN_MAX;
+	int p = lo + (int)((int64_t)game_lba * (hi - lo) / GAME_SPAN_MAX);
 	if (p < lo) p = lo;
 	if (p > hi) p = hi;
 	return p;
 }
 
-
-
-
-static int open_prop(void)
+static int decoy_acquire(void)
 {
 	if (physical_disc_drive_busy()) return -1;
 
@@ -219,185 +172,162 @@ static int open_prop(void)
 		e.cdte_format = CDROM_LBA;
 		if (ioctl(fd, CDROMREADTOCENTRY, &e) < 0) { close(fd); continue; }
 
-		ac.prop_max = e.cdte_addr.lba;
-		
-		ac.read_lo = 0;
-		ac.read_hi = ac.prop_max - MAX_BURST - READ_GUARD;
-		if (ac.read_hi < ac.read_lo) ac.read_hi = ac.read_lo;
-		ac.read_unsupported = 0;   
-		ac.fd = fd;
-		
-		static int last_logged_max = -1;
-		if (ac.prop_max != last_logged_max) {
-			printf("physical_disc_acoustic: prop disc on %s, %d sectors\n", path, ac.prop_max);
-			last_logged_max = ac.prop_max;
+		decoy.disc_span = e.cdte_addr.lba;
+		decoy.span_lo = 0;
+		decoy.span_hi = decoy.disc_span - BURST_MAX - END_GUARD_SECTORS;
+		if (decoy.span_hi < decoy.span_lo) decoy.span_hi = decoy.span_lo;
+		decoy.no_read = 0;
+		decoy.dev_fd = fd;
+
+		static int last_logged_span = -1;
+		if (decoy.disc_span != last_logged_span) {
+			printf("physical_disc_acoustic: prop disc on %s, %d sectors\n", path, decoy.disc_span);
+			last_logged_span = decoy.disc_span;
 		}
 		return 0;
 	}
 	return -1;
 }
 
-static void close_prop(void)
+static void decoy_release(void)
 {
-	if (ac.fd >= 0) { close(ac.fd); ac.fd = -1; }
-	ac.prop_max = 0;
+	if (decoy.dev_fd >= 0) { close(decoy.dev_fd); decoy.dev_fd = -1; }
+	decoy.disc_span = 0;
 }
 
-static void *acoustic_thread(void *arg)
+static void *decoy_worker_main(void *arg)
 {
 	(void)arg;
-	unsigned last_seq = 0, seq_prev = 0;
-	double last_active = 0, last_open_try = 0, last_read = 0;
-	double t_sample = 0, rate = 0;
-	int last_pos = -1000000;         
-	int seek_fails = 0, read_fails = 0, reopen_fails = 0;
-	int idle_stopped = 0;
-	int cur_speed = 0;               
-	double last_speed_ms = 0;
+	unsigned seq_seen = 0, seq_base = 0;
+	double active_at = 0, open_attempt_at = 0, io_at = 0;
+	double rate_at = 0, rate = 0;
+	int prior_lba = -1000000;
+	int seek_faults = 0, read_faults = 0, reopen_faults = 0;
+	int spun_down = 0;
+	int applied_speed = 0;
+	double speed_changed_at = 0;
 
-	while (ac.running) {
-		
-		
-		if (!ac.enabled || ac.paused || ac.unsupported) {
-			close_prop();
+	while (decoy.alive) {
+		if (!decoy.on || decoy.held || decoy.disabled_perm) {
+			decoy_release();
 			struct timespec ts = { 0, 150 * 1000 * 1000 };
 			nanosleep(&ts, NULL);
 			continue;
 		}
 
-		unsigned seq = ac.seq;
-		double now = now_ms();
-		if (seq != last_seq) { last_seq = seq; last_active = now; idle_stopped = 0; }
+		unsigned seq = decoy.touch_count;
+		double now = clock_ms();
+		if (seq != seq_seen) { seq_seen = seq; active_at = now; spun_down = 0; }
 
-		
-		
-		if (now - last_active >= ACTIVE_MS) {
-			if (!idle_stopped && ac.fd >= 0 && !ac.read_unsupported
-			    && now - last_active >= DEEP_IDLE_MS) {
-				sg_start_stop(ac.fd, 0);
-				idle_stopped = 1;
-				cur_speed = 0;   
+		if (now - active_at >= ACTIVITY_WINDOW_MS) {
+			if (!spun_down && decoy.dev_fd >= 0 && !decoy.no_read
+			    && now - active_at >= SPINDOWN_IDLE_MS) {
+				decoy_spin(decoy.dev_fd, 0);
+				spun_down = 1;
+				applied_speed = 0;
 			}
 			struct timespec ts = { 0, 80 * 1000 * 1000 };
 			nanosleep(&ts, NULL);
 			continue;
 		}
 
-		
 		if (physical_disc_drive_busy()) {
-			close_prop();
+			decoy_release();
 			struct timespec ts = { 0, 200 * 1000 * 1000 };
 			nanosleep(&ts, NULL);
 			continue;
 		}
 
-		if (ac.fd < 0) {
-			
-			if (now - last_open_try < 1000) {
+		if (decoy.dev_fd < 0) {
+			if (now - open_attempt_at < 1000) {
 				struct timespec ts = { 0, 100 * 1000 * 1000 };
 				nanosleep(&ts, NULL);
 				continue;
 			}
-			last_open_try = now;
-			if (open_prop()) {
+			open_attempt_at = now;
+			if (decoy_acquire()) {
 				struct timespec ts = { 0, 100 * 1000 * 1000 };
 				nanosleep(&ts, NULL);
 				continue;
 			}
-			last_pos = -1000000;   
-			cur_speed = 0;         
+			prior_lba = -1000000;
+			applied_speed = 0;
 		}
 
-		
-		
-		
-		
-		if (now - t_sample >= SAMPLE_MS) {
-			unsigned d = seq - seq_prev;
-			double dt = now - t_sample;
+		if (now - rate_at >= RATE_SAMPLE_MS) {
+			unsigned d = seq - seq_base;
+			double dt = now - rate_at;
 			double inst = dt > 0 ? d * 1000.0 / dt : 0;
-			rate += (inst - rate) * 0.3;   
-			seq_prev = seq;
-			t_sample = now;
+			rate += (inst - rate) * 0.3;
+			seq_base = seq;
+			rate_at = now;
 		}
 		int burst = 2 + (int)((rate - 8) / 6);
-		if (burst < MIN_BURST) burst = MIN_BURST;
-		if (burst > MAX_BURST) burst = MAX_BURST;
+		if (burst < BURST_MIN) burst = BURST_MIN;
+		if (burst > BURST_MAX) burst = BURST_MAX;
 		double gap = 120.0 - rate;
 		if (gap < 10.0) gap = 10.0;
 		if (gap > 120.0) gap = 120.0;
 
-		
-		
-		
-		
-		
-		if (!ac.read_unsupported) {
-			double target = SPEED_MIN + rate / 12.0;
-			if (target > SPEED_MAX) target = SPEED_MAX;
-			int want = cur_speed;
-			if (cur_speed < SPEED_MIN) want = SPEED_MIN;                
-			else if (target >= cur_speed + SPEED_STEP) want = cur_speed + SPEED_STEP;
-			else if (target <= cur_speed - SPEED_STEP) want = cur_speed - SPEED_STEP;
-			if (want > SPEED_MAX) want = SPEED_MAX;
-			if (want < SPEED_MIN) want = SPEED_MIN;
-			if (want != cur_speed && now - last_speed_ms >= SPEED_DEBOUNCE_MS) {
-				set_speed(ac.fd, want);
-				cur_speed = want;
-				last_speed_ms = now;
+		if (!decoy.no_read) {
+			double target = DRIVE_SPEED_MIN + rate / 12.0;
+			if (target > DRIVE_SPEED_MAX) target = DRIVE_SPEED_MAX;
+			int want = applied_speed;
+			if (applied_speed < DRIVE_SPEED_MIN) want = DRIVE_SPEED_MIN;
+			else if (target >= applied_speed + DRIVE_SPEED_STEP) want = applied_speed + DRIVE_SPEED_STEP;
+			else if (target <= applied_speed - DRIVE_SPEED_STEP) want = applied_speed - DRIVE_SPEED_STEP;
+			if (want > DRIVE_SPEED_MAX) want = DRIVE_SPEED_MAX;
+			if (want < DRIVE_SPEED_MIN) want = DRIVE_SPEED_MIN;
+			if (want != applied_speed && now - speed_changed_at >= SPEED_CHANGE_DEBOUNCE_MS) {
+				decoy_set_speed(decoy.dev_fd, want);
+				applied_speed = want;
+				speed_changed_at = now;
 			}
 		}
 
-		int lba = map_lba(ac.target_lba);
-		int jump = lba > last_pos ? lba - last_pos : last_pos - lba;
+		int lba = project_lba(decoy.game_pos);
+		int jump = lba > prior_lba ? lba - prior_lba : prior_lba - lba;
 
-		if (!ac.read_unsupported) {
-			
-			if (jump >= JUMP_THRESHOLD || now - last_read >= gap) {
-				int r = sg_read10(ac.fd, lba, burst);
+		if (!decoy.no_read) {
+			if (jump >= REPOSITION_JUMP || now - io_at >= gap) {
+				int r = decoy_read(decoy.dev_fd, lba, burst);
 				if (r == 0) {
-					read_fails = 0; seek_fails = 0; reopen_fails = 0;
-					last_read = now; last_pos = lba;
+					read_faults = 0; seek_faults = 0; reopen_faults = 0;
+					io_at = now; prior_lba = lba;
 				} else if (r == -1) {
-					
-					
-					close_prop(); read_fails = 0;
-					if (++reopen_fails >= REOPEN_GIVEUP) {
+					decoy_release(); read_faults = 0;
+					if (++reopen_faults >= REOPEN_FAIL_LIMIT) {
 						printf("physical_disc_acoustic: drive keeps dropping, disabling for this session\n");
-						ac.unsupported = 1;
+						decoy.disabled_perm = 1;
 					}
 				} else {
-					
-					
-					
-					if (++read_fails >= READ_GIVEUP) {
+					if (++read_faults >= READ_FAIL_LIMIT) {
 						printf("physical_disc_acoustic: drive rejects READ(10), seek-only fallback\n");
-						ac.read_unsupported = 1;
+						decoy.no_read = 1;
 					} else {
-						sg_seek(ac.fd, lba);
+						decoy_seek(decoy.dev_fd, lba);
 					}
-					last_read = now; last_pos = lba;
+					io_at = now; prior_lba = lba;
 				}
 			}
-		} else if (!ac.unsupported) {
-			
-			if (jump >= JUMP_THRESHOLD || now - last_read >= KEEPALIVE_MS) {
-				int r = sg_seek(ac.fd, lba);
+		} else if (!decoy.disabled_perm) {
+			if (jump >= REPOSITION_JUMP || now - io_at >= IDLE_SEEK_PERIOD_MS) {
+				int r = decoy_seek(decoy.dev_fd, lba);
 				if (r == -1) {
-					close_prop(); seek_fails = 0;
-					if (++reopen_fails >= REOPEN_GIVEUP) {
+					decoy_release(); seek_faults = 0;
+					if (++reopen_faults >= REOPEN_FAIL_LIMIT) {
 						printf("physical_disc_acoustic: drive keeps dropping, disabling for this session\n");
-						ac.unsupported = 1;
+						decoy.disabled_perm = 1;
 					}
 				} else if (r < 0) {
-					if (++seek_fails >= 4) {
+					if (++seek_faults >= SEEK_FAIL_LIMIT) {
 						printf("physical_disc_acoustic: drive does not accept SEEK, disabling for this session\n");
-						ac.unsupported = 1;
-						close_prop();
+						decoy.disabled_perm = 1;
+						decoy_release();
 					}
 				} else {
-					seek_fails = 0; reopen_fails = 0;
-					last_read = now; last_pos = lba;
+					seek_faults = 0; reopen_faults = 0;
+					io_at = now; prior_lba = lba;
 				}
 			}
 		}
@@ -406,18 +336,18 @@ static void *acoustic_thread(void *arg)
 		nanosleep(&ts, NULL);
 	}
 
-	close_prop();
+	decoy_release();
 	return NULL;
 }
 
 void physical_disc_acoustic_config(int enabled)
 {
-	ac.enabled = enabled ? 1 : 0;
-	if (ac.enabled && !ac.running) {
-		ac.running = 1;
-		ac.paused = 0;
-		if (pthread_create(&ac.thread, NULL, acoustic_thread, NULL)) {
-			ac.running = 0;
+	decoy.on = enabled ? 1 : 0;
+	if (decoy.on && !decoy.alive) {
+		decoy.alive = 1;
+		decoy.held = 0;
+		if (pthread_create(&decoy.worker, NULL, decoy_worker_main, NULL)) {
+			decoy.alive = 0;
 			printf("physical_disc_acoustic: could not start thread\n");
 			return;
 		}
@@ -425,24 +355,19 @@ void physical_disc_acoustic_config(int enabled)
 	}
 }
 
-
-
-
-
-
 void physical_disc_acoustic_hint(int lba)
 {
-	if (!ac.enabled || ac.paused) return;
-	ac.target_lba = lba;
-	ac.seq++;
+	if (!decoy.on || decoy.held) return;
+	decoy.game_pos = lba;
+	decoy.touch_count++;
 }
 
 void physical_disc_acoustic_pause(void)
 {
-	ac.paused = 1;
+	decoy.held = 1;
 }
 
 void physical_disc_acoustic_resume(void)
 {
-	ac.paused = 0;
+	decoy.held = 0;
 }

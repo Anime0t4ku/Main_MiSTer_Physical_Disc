@@ -384,7 +384,7 @@ static int load_physical_cd(toc_t* table)
 	if (data_lba >= 0)
 	{
 		uint8_t probe[CDI_SECTOR_LEN];
-		physical_disc_read_sector(data_lba + 16, probe, NULL);
+		physical_disc_probe_sector(data_lba + 16, probe);
 		int ready = probe[0] == 0 && probe[11] == 0 && probe[15] == 2;
 		for (int i = 1; i < 11 && ready; i++) ready = probe[i] == 0xFF;
 		if (!ready)

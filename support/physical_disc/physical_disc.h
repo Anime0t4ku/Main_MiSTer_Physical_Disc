@@ -91,6 +91,7 @@ int physical_disc_toc_audio_only(const toc_t *toc);
 
 
 int physical_disc_read_sector(int lba, uint8_t *dst, uint8_t *sub96);
+int physical_disc_probe_sector(int lba, uint8_t *dst);
 
 
 

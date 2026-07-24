@@ -1,15 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,193 +16,119 @@
 #include "physical_disc.h"
 #include "physical_disc_acoustic.h"
 
-
-
-#define CACHE_SECTORS 4096            
-#define NWIN 2                        
-#define WIN_SECTORS (CACHE_SECTORS / NWIN)
-#define SLOT_SIZE (PHYSICAL_DISC_RAW + PHYSICAL_DISC_SUB)
-#define READAHEAD 96                  
-#define BURST 16                      
-#define PREWARM_SECTORS 768           
-#define STATS_MS 5000
-#define SWAP_CHECK_MS 500             
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#define SYNC_BURST 8
-#define SYNC_TIMEOUT_MS 3000
-#define BG_TIMEOUT_MS 3000
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#define PHYSICAL_DISC_SPEED_NX 4
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#define KEEPALIVE_MS 15000
-
-
-
-
-
-
-
-
-
-
-
+#define RING_SECTORS        4096
+#define LANE_COUNT          2
+#define LANE_SECTORS        (RING_SECTORS / LANE_COUNT)
+#define ENTRY_SIZE          (PHYSICAL_DISC_RAW + PHYSICAL_DISC_SUB)
+#define LOOKAHEAD_SPAN      96
+#define IO_BURST            16
+#define WARMUP_SECTORS      768
+#define STATS_PERIOD_MS     5000
+#define SWAP_POLL_MS        500
+#define SYNC_IO_BURST       8
+#define SYNC_IO_TIMEOUT_MS  3000
+#define BG_IO_TIMEOUT_MS    3000
+#define CAPPED_SPEED_NX     4
+#define IDLE_KEEPALIVE_MS   15000
 
 typedef struct {
-	int lba;                      
-	int has_sub;
-	int bad;                      
-	uint8_t data[SLOT_SIZE];
-} slot_t;
+	int lba;
+	int sub_present;
+	int unreadable;
+	uint8_t data[ENTRY_SIZE];
+} cache_entry_t;
 
 typedef struct {
-	int start;
-	int end;
-	int audio;
-} phys_trk_t;
+	int lo;
+	int hi;
+	int is_audio;
+} track_span_t;
 
-static struct {
-	volatile int fd;              
-	int leadout;                  
-	int first_data_lba;
-	int sub_ok;                   
-	phys_trk_t trk[100];
-	int ntrk;
-	slot_t *cache;
-	volatile int cursor[NWIN];    
-	volatile int wactive[NWIN];
-	volatile int running;
-	volatile int sync_pending;    
-	pthread_t thread;
-	pthread_mutex_t lock;         
-	pthread_mutex_t io;           
-	uint32_t st_hit, st_miss;     
-	uint32_t st_bad;              
-	uint32_t st_bad_logged;
-	double st_worst_ms;           
-	double st_worst_io_ms;        
-	volatile int consec_fail;     
-	uint32_t st_reattach;         
-	volatile int watch_mode;      
-	volatile int ev;              
-	volatile int ev_type;
-	volatile int ev_region;
-	volatile int ev_initial;      
-	int watch_present;            
-	int watch_type;
-	char watch_label[64];
-	volatile int watch_dirty;     
-	volatile int swap_enable;     
-	volatile int swap_ready;      
-	volatile int swapping;        
-	volatile int last_win;        
-	volatile int prewarm;         
-	volatile int prewarm_end;     
-	volatile int swap_ejected;    
-	volatile int native_speed;
-} pcd = { -1, 0, -1, -1, {}, 0, NULL, {0,0}, {0,0}, 0, 0, 0,
+typedef struct {
+	volatile int dev_fd;
+	int leadout_lba;
+	int data_lba0;
+	int subch_ok;
+	track_span_t span[100];
+	int track_count;
+	cache_entry_t *ring;
+	volatile int lane_cursor[LANE_COUNT];
+	volatile int lane_active[LANE_COUNT];
+	volatile int alive;
+	volatile int sync_busy;
+	pthread_t io_thread;
+	pthread_mutex_t ring_lock;
+	pthread_mutex_t io_lock;
+	uint32_t hit_count, miss_count;
+	uint32_t bad_count;
+	uint32_t bad_logged;
+	double worst_wait_ms;
+	double worst_io_ms;
+	volatile int fail_streak;
+	uint32_t reattach_count;
+	volatile int watching;
+	volatile int event_code;
+	volatile int event_disc_type;
+	volatile int event_region;
+	volatile int event_initial;
+	int seen_present;
+	int seen_type;
+	char seen_label[64];
+	volatile int seen_dirty;
+	volatile int swap_armed;
+	volatile int swap_ready;
+	volatile int mid_swap;
+	volatile int active_lane;
+	volatile int warmup_lba;
+	volatile int warmup_end;
+	volatile int swap_out;
+	volatile int want_native_speed;
+} drive_state_t;
+
+static drive_state_t drv = { -1, 0, -1, -1, {}, 0, NULL, {0,0}, {0,0}, 0, 0, 0,
 	  PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
 	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, -1, -1, 0, 0, 0 };
 
+#define SWAP_MARKER_PATH "/tmp/physical_disc_swapped"
 
-
-
-#define PHYSICAL_DISC_SWAPPED_MARKER "/tmp/physical_disc_swapped"
-
-static int track_of(int lba)
+static int span_index(int lba)
 {
-	for (int i = 0; i < pcd.ntrk; i++)
-		if (lba < pcd.trk[i].end) return i;
-	return pcd.ntrk ? pcd.ntrk - 1 : -1;
+	for (int i = 0; i < drv.track_count; i++)
+		if (lba < drv.span[i].hi) return i;
+	return drv.track_count ? drv.track_count - 1 : -1;
 }
 
-static char pref_dev[64] = "";       
-static char cur_dev[64] = "";        
+static char preferred_dev[64] = "";
+static char active_dev[64] = "";
 
-static inline int win_of(int lba)
+static inline int lane_of(int lba)
 {
-	int t = track_of(lba);
-	return (t >= 0 && pcd.trk[t].audio) ? 1 : 0;
+	int t = span_index(lba);
+	return (t >= 0 && drv.span[t].is_audio) ? 1 : 0;
 }
 
-static inline slot_t *slot_for(int lba)
+static inline cache_entry_t *entry_for(int lba)
 {
-	return &pcd.cache[win_of(lba) * WIN_SECTORS + (lba % WIN_SECTORS)];
+	return &drv.ring[lane_of(lba) * LANE_SECTORS + (lba % LANE_SECTORS)];
 }
 
-static double now_ms()
+static double clock_ms()
 {
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
 }
 
-
-
-
-static void set_speed_cap()
+static void apply_speed_cap()
 {
-	if (pcd.fd < 0) return;
+	if (drv.dev_fd < 0) return;
 
 	int audio = 0;
-	for (int i = 0; i < pcd.ntrk; i++)
-		if (pcd.trk[i].audio) audio = 1;
+	for (int i = 0; i < drv.track_count; i++)
+		if (drv.span[i].is_audio) audio = 1;
 
-	int speed = pcd.native_speed && pcd.ntrk > 0 && !audio ? 0 : PHYSICAL_DISC_SPEED_NX;
-	if (ioctl(pcd.fd, CDROM_SELECT_SPEED, speed) < 0)
+	int speed = drv.want_native_speed && drv.track_count > 0 && !audio ? 0 : CAPPED_SPEED_NX;
+	if (ioctl(drv.dev_fd, CDROM_SELECT_SPEED, speed) < 0)
 		printf("DISC: speed selection not supported, drive keeps its default\n");
 	else if (speed)
 		printf("DISC: speed capped at %dx (~%d KB/s, need 172)\n", speed, speed * 177);
@@ -224,23 +138,11 @@ static void set_speed_cap()
 
 void physical_disc_native_speed(int enable)
 {
-	pcd.native_speed = enable ? 1 : 0;
-	if (pcd.fd >= 0 && pcd.ntrk > 0) set_speed_cap();
+	drv.want_native_speed = enable ? 1 : 0;
+	if (drv.dev_fd >= 0 && drv.track_count > 0) apply_speed_cap();
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-static void quiet_block_probes(const char *dev)
+static void silence_block_probes(const char *dev)
 {
 	const char *name = strrchr(dev, '/');
 	name = name ? name + 1 : dev;
@@ -263,7 +165,7 @@ static void quiet_block_probes(const char *dev)
 	}
 }
 
-static void install_physical_disc_rule(void)
+static void install_udev_rule(void)
 {
 	static const char *path = "/etc/udev/rules.d/59-physical-disc-cdrom.rules";
 	static const char *rule =
@@ -291,19 +193,17 @@ static void install_physical_disc_rule(void)
 
 void physical_disc_prepare_environment(void)
 {
-	install_physical_disc_rule();
+	install_udev_rule();
 }
 
-
-
-static int sg_read_cd(int lba, int count, uint8_t flags, int with_sub, uint8_t *dst, int timeout_ms)
+static int scsi_read_cd(int lba, int count, uint8_t flags, int with_sub, uint8_t *dst, int timeout_ms)
 {
 	uint8_t cdb[12] = { 0 };
 	uint8_t sense[32];
 	struct sg_io_hdr io;
 	int sector_len = PHYSICAL_DISC_RAW + (with_sub ? PHYSICAL_DISC_SUB : 0);
 
-	cdb[0] = 0xBE;                          
+	cdb[0] = 0xBE;
 	cdb[2] = (lba >> 24) & 0xFF;
 	cdb[3] = (lba >> 16) & 0xFF;
 	cdb[4] = (lba >> 8) & 0xFF;
@@ -311,8 +211,8 @@ static int sg_read_cd(int lba, int count, uint8_t flags, int with_sub, uint8_t *
 	cdb[6] = (count >> 16) & 0xFF;
 	cdb[7] = (count >> 8) & 0xFF;
 	cdb[8] = count & 0xFF;
-	cdb[9] = flags;                         
-	cdb[10] = with_sub ? 0x01 : 0x00;       
+	cdb[9] = flags;
+	cdb[10] = with_sub ? 0x01 : 0x00;
 
 	memset(&io, 0, sizeof(io));
 	io.interface_id = 'S';
@@ -325,14 +225,12 @@ static int sg_read_cd(int lba, int count, uint8_t flags, int with_sub, uint8_t *
 	io.mx_sb_len = sizeof(sense);
 	io.timeout = timeout_ms;
 
-	if (ioctl(pcd.fd, SG_IO, &io) < 0) return -1;
+	if (ioctl(drv.dev_fd, SG_IO, &io) < 0) return -1;
 	if (io.status || io.host_status || io.driver_status) return -2;
 	return 0;
 }
 
-
-
-static int cooked_read_raw(int lba, uint8_t *dst)
+static int ioctl_read_raw(int lba, uint8_t *dst)
 {
 	union {
 		struct cdrom_msf msf;
@@ -345,226 +243,170 @@ static int cooked_read_raw(int lba, uint8_t *dst)
 	req.msf.cdmsf_sec0 = (f / 75) % 60;
 	req.msf.cdmsf_frame0 = f % 75;
 
-	if (ioctl(pcd.fd, CDROMREADRAW, &req) < 0) return -1;
+	if (ioctl(drv.dev_fd, CDROMREADRAW, &req) < 0) return -1;
 	memcpy(dst, req.raw, PHYSICAL_DISC_RAW);
 	return 0;
 }
 
-
-
-
-
-static int fill_cache(int lba, int count, int sync)
+static int refill_ring(int lba, int count, int sync)
 {
-	uint8_t burst[BURST * SLOT_SIZE];     
+	uint8_t burst[IO_BURST * ENTRY_SIZE];
 
-	if (count > BURST) count = BURST;
+	if (count > IO_BURST) count = IO_BURST;
 	if (lba < 0) lba = 0;
-	if (lba + count > pcd.leadout) count = pcd.leadout - lba;
+	if (lba + count > drv.leadout_lba) count = drv.leadout_lba - lba;
 	if (count <= 0) return 0;
 
-	int t = track_of(lba);
-	if (t >= 0 && lba + count > pcd.trk[t].end) count = pcd.trk[t].end - lba;
-	uint8_t flags = (t >= 0 && pcd.trk[t].audio) ? 0x10 : 0xF8;
+	int t = span_index(lba);
+	if (t >= 0 && lba + count > drv.span[t].hi) count = drv.span[t].hi - lba;
+	uint8_t flags = (t >= 0 && drv.span[t].is_audio) ? 0x10 : 0xF8;
 
-	int with_sub = (pcd.sub_ok == 1);
+	int with_sub = (drv.subch_ok == 1);
 
-	
-
-
-	double io0 = now_ms();
-	pthread_mutex_lock(&pcd.io);
-	int r = sg_read_cd(lba, count, flags, with_sub, burst,
-		sync ? SYNC_TIMEOUT_MS : BG_TIMEOUT_MS);
-	pthread_mutex_unlock(&pcd.io);
+	double io0 = clock_ms();
+	pthread_mutex_lock(&drv.io_lock);
+	int r = scsi_read_cd(lba, count, flags, with_sub, burst,
+		sync ? SYNC_IO_TIMEOUT_MS : BG_IO_TIMEOUT_MS);
+	pthread_mutex_unlock(&drv.io_lock);
 
 	if (r && with_sub && count > 1) {
-		
-
-
-
-
-
-
-
-
-		pthread_mutex_lock(&pcd.io);
-		int r2 = sg_read_cd(lba, count, flags, 0, burst,
-			sync ? SYNC_TIMEOUT_MS : BG_TIMEOUT_MS);
-		pthread_mutex_unlock(&pcd.io);
+		pthread_mutex_lock(&drv.io_lock);
+		int r2 = scsi_read_cd(lba, count, flags, 0, burst,
+			sync ? SYNC_IO_TIMEOUT_MS : BG_IO_TIMEOUT_MS);
+		pthread_mutex_unlock(&drv.io_lock);
 		if (!r2) {
 			printf("DISC: drive rejects multi-sector subchannel reads, disabling subchannel\n");
-			pcd.sub_ok = 0;
+			drv.subch_ok = 0;
 			with_sub = 0;
 			r = 0;
 		}
 	}
 
 	if (r && sync) {
-		
-
-
-
-
-
-
-
-
-		double dt = now_ms() - io0;
-		if (dt > pcd.st_worst_io_ms) pcd.st_worst_io_ms = dt;
+		double dt = clock_ms() - io0;
+		if (dt > drv.worst_io_ms) drv.worst_io_ms = dt;
 		return -1;
 	}
 
 	if (r) {
 		for (int i = 0; i < count; i++) {
-			uint8_t one[SLOT_SIZE];
+			uint8_t one[ENTRY_SIZE];
 			int rr = -1;
-			
 
 			for (int n = 0; n < 3 && rr; n++) {
-				pthread_mutex_lock(&pcd.io);
-				rr = sg_read_cd(lba + i, 1, flags, 0, one, BG_TIMEOUT_MS);
-				pthread_mutex_unlock(&pcd.io);
+				pthread_mutex_lock(&drv.io_lock);
+				rr = scsi_read_cd(lba + i, 1, flags, 0, one, BG_IO_TIMEOUT_MS);
+				pthread_mutex_unlock(&drv.io_lock);
 			}
 			if (rr) {
-				pthread_mutex_lock(&pcd.io);
-				rr = cooked_read_raw(lba + i, one);
-				pthread_mutex_unlock(&pcd.io);
+				pthread_mutex_lock(&drv.io_lock);
+				rr = ioctl_read_raw(lba + i, one);
+				pthread_mutex_unlock(&drv.io_lock);
 			}
-			
 
-			if (rr) pcd.consec_fail++; else pcd.consec_fail = 0;
-			pthread_mutex_lock(&pcd.lock);
-			slot_t *s = slot_for(lba + i);
+			if (rr) drv.fail_streak++; else drv.fail_streak = 0;
+			pthread_mutex_lock(&drv.ring_lock);
+			cache_entry_t *e = entry_for(lba + i);
 			if (!rr) {
-				memcpy(s->data, one, PHYSICAL_DISC_RAW);
-				s->bad = 0;
+				memcpy(e->data, one, PHYSICAL_DISC_RAW);
+				e->unreadable = 0;
 			} else {
-				
-
-
-
-
-				memset(s->data, 0, PHYSICAL_DISC_RAW);
-				s->bad = 1;
-				pcd.st_bad++;
-				
-
-
-				if (pcd.st_bad_logged < 8) {
-					pcd.st_bad_logged++;
+				memset(e->data, 0, PHYSICAL_DISC_RAW);
+				e->unreadable = 1;
+				drv.bad_count++;
+				if (drv.bad_logged < 8) {
+					drv.bad_logged++;
 					printf("DISC: unreadable sector lba=%d%s\n", lba + i,
-						pcd.st_bad_logged == 8 ? " (further ones counted silently)" : "");
+						drv.bad_logged == 8 ? " (further ones counted silently)" : "");
 				}
 			}
-			memset(s->data + PHYSICAL_DISC_RAW, 0, PHYSICAL_DISC_SUB);
-			s->has_sub = 0;
-			s->lba = lba + i;
-			pthread_mutex_unlock(&pcd.lock);
+			memset(e->data + PHYSICAL_DISC_RAW, 0, PHYSICAL_DISC_SUB);
+			e->sub_present = 0;
+			e->lba = lba + i;
+			pthread_mutex_unlock(&drv.ring_lock);
 		}
-		double d = now_ms() - io0;
-		if (d > pcd.st_worst_io_ms) pcd.st_worst_io_ms = d;
+		double d = clock_ms() - io0;
+		if (d > drv.worst_io_ms) drv.worst_io_ms = d;
 		return 0;
 	}
 
-	double d = now_ms() - io0;
-	if (d > pcd.st_worst_io_ms) pcd.st_worst_io_ms = d;
+	double d = clock_ms() - io0;
+	if (d > drv.worst_io_ms) drv.worst_io_ms = d;
 
-	pcd.consec_fail = 0;          
+	drv.fail_streak = 0;
 
 	int sector_len = PHYSICAL_DISC_RAW + (with_sub ? PHYSICAL_DISC_SUB : 0);
-	pthread_mutex_lock(&pcd.lock);
+	pthread_mutex_lock(&drv.ring_lock);
 	for (int i = 0; i < count; i++) {
-		slot_t *s = slot_for(lba + i);
-		memcpy(s->data, burst + i * sector_len, sector_len);
-		if (!with_sub) memset(s->data + PHYSICAL_DISC_RAW, 0, PHYSICAL_DISC_SUB);
-		s->has_sub = with_sub;
-		s->lba = lba + i;
+		cache_entry_t *e = entry_for(lba + i);
+		memcpy(e->data, burst + i * sector_len, sector_len);
+		if (!with_sub) memset(e->data + PHYSICAL_DISC_RAW, 0, PHYSICAL_DISC_SUB);
+		e->sub_present = with_sub;
+		e->lba = lba + i;
 	}
-	pthread_mutex_unlock(&pcd.lock);
+	pthread_mutex_unlock(&drv.ring_lock);
 	return 0;
 }
 
-
-
-static void stats_report()
+static void write_stats_log()
 {
 	FILE *f = fopen("/tmp/physical_disc_stats.log", "w");
 	if (f) {
 		fprintf(f, "hit %u miss %u  hitrate %.1f%%  worst miss %.0f ms\n",
-			pcd.st_hit, pcd.st_miss,
-			(pcd.st_hit + pcd.st_miss) ? 100.0 * pcd.st_hit / (pcd.st_hit + pcd.st_miss) : 0.0,
-			pcd.st_worst_ms);
-		
-
-
+			drv.hit_count, drv.miss_count,
+			(drv.hit_count + drv.miss_count) ? 100.0 * drv.hit_count / (drv.hit_count + drv.miss_count) : 0.0,
+			drv.worst_wait_ms);
 		fprintf(f, "BAD %u sectors served as zeros  worst drive io %.0f ms\n",
-			pcd.st_bad, pcd.st_worst_io_ms);
-		
-
-		fprintf(f, "REATTACH %u  (device %s)\n", pcd.st_reattach, cur_dev);
-		fprintf(f, "data  window: active %d cursor %d\n", pcd.wactive[0], pcd.cursor[0]);
-		fprintf(f, "cdda  window: active %d cursor %d\n", pcd.wactive[1], pcd.cursor[1]);
+			drv.bad_count, drv.worst_io_ms);
+		fprintf(f, "REATTACH %u  (device %s)\n", drv.reattach_count, active_dev);
+		fprintf(f, "data  window: active %d cursor %d\n", drv.lane_active[0], drv.lane_cursor[0]);
+		fprintf(f, "cdda  window: active %d cursor %d\n", drv.lane_active[1], drv.lane_cursor[1]);
 		fclose(f);
 	}
-	pcd.st_hit = pcd.st_miss = 0;
-	pcd.st_worst_ms = 0.0;
-	pcd.st_worst_io_ms = 0.0;
-	
-
+	drv.hit_count = drv.miss_count = 0;
+	drv.worst_wait_ms = 0.0;
+	drv.worst_io_ms = 0.0;
 }
 
-static int open_drive(char *out, int outsz);   
+static int find_drive(char *out, int outsz);
 
-
-
-
-
-
-
-
-
-
-
-
-
-static int device_gone(void)
+static int drive_missing(void)
 {
-	if (pcd.fd < 0) return 1;
-	if (ioctl(pcd.fd, CDROM_DRIVE_STATUS, CDSL_CURRENT) >= 0) return 0;
+	if (drv.dev_fd < 0) return 1;
+	if (ioctl(drv.dev_fd, CDROM_DRIVE_STATUS, CDSL_CURRENT) >= 0) return 0;
 	return (errno == ENODEV || errno == ENXIO || errno == EIO || errno == ESHUTDOWN);
 }
 
-static void try_reattach(void)
+static void reattach_drive(void)
 {
 	char newdev[64] = "";
 
-	pthread_mutex_lock(&pcd.io);
-	if (pcd.fd >= 0) { close(pcd.fd); pcd.fd = -1; }
+	pthread_mutex_lock(&drv.io_lock);
+	if (drv.dev_fd >= 0) { close(drv.dev_fd); drv.dev_fd = -1; }
 
-	int fd = open_drive(newdev, sizeof(newdev));
+	int fd = find_drive(newdev, sizeof(newdev));
 	if (fd >= 0) {
-		pcd.fd = fd;
-		snprintf(cur_dev, 64, "%s", newdev);
-		pcd.st_reattach++;
-		pcd.consec_fail = 0;
-		quiet_block_probes(cur_dev);   
-		set_speed_cap();
+		drv.dev_fd = fd;
+		snprintf(active_dev, 64, "%s", newdev);
+		drv.reattach_count++;
+		drv.fail_streak = 0;
+		silence_block_probes(active_dev);
+		apply_speed_cap();
 		printf("DISC: drive re-attached as %s (recovered from a usb reset)\n", newdev);
 	}
 	else {
 		printf("DISC: drive still missing, will retry\n");
 	}
-	pthread_mutex_unlock(&pcd.io);
+	pthread_mutex_unlock(&drv.io_lock);
 }
 
-static void *prefetch_thread(void *arg)
+static void *ring_worker_main(void *arg)
 {
 	(void)arg;
-	int rr = 0;                                
-	double last_stats = now_ms();
+	int rr = 0;
+	double last_stats = clock_ms();
 	double last_reattach = 0;
-	double last_io = now_ms();
+	double last_io = clock_ms();
 
 	double last_watch = 0;
 	int was_present = -1;
@@ -573,23 +415,16 @@ static void *prefetch_thread(void *arg)
 	int swap_was_present = -1;
 	int swap_ejected = 0;
 
-	while (pcd.running) {
+	while (drv.alive) {
 		int target = -1;
 
-		
+		if (drv.watching) {
+			if (clock_ms() - last_watch >= 2000) {
+				last_watch = clock_ms();
 
-
-		if (pcd.watch_mode) {
-			if (now_ms() - last_watch >= 2000) {
-				last_watch = now_ms();
-
-				
-
-
-
-				if (device_gone() && now_ms() - last_reattach > 5000) {
-					last_reattach = now_ms();
-					try_reattach();
+				if (drive_missing() && clock_ms() - last_reattach > 5000) {
+					last_reattach = clock_ms();
+					reattach_drive();
 					was_present = -1;
 				}
 
@@ -597,45 +432,30 @@ static void *prefetch_thread(void *arg)
 				int changed = physical_disc_media_changed();
 
 				if (present && (was_present != 1 || changed)) {
-					
-
-
-
-
 					physical_disc_forget_disc();
 
 					physical_disc_disc_t t = physical_disc_identify();
 					physical_disc_region_t r = physical_disc_region();
 
 					if (t == PHYSICAL_DISC_DISC_NONE) {
-						
-
-
 						printf("DISC: disc present but unreadable, retrying\n");
 					}
 					else {
-						
-
-
-
-
 						char lbl[64];
 						if (!physical_disc_disc_label(lbl, sizeof(lbl)))
 							physical_disc_disc_serial(lbl, sizeof(lbl));
-						pthread_mutex_lock(&pcd.lock);
-						snprintf(pcd.watch_label, sizeof(pcd.watch_label), "%s", lbl);
-						pcd.watch_type = (int)t;
-						pcd.watch_present = 1;
-						
+						pthread_mutex_lock(&drv.ring_lock);
+						snprintf(drv.seen_label, sizeof(drv.seen_label), "%s", lbl);
+						drv.seen_type = (int)t;
+						drv.seen_present = 1;
 
+						drv.seen_dirty = 1;
+						pthread_mutex_unlock(&drv.ring_lock);
 
-						pcd.watch_dirty = 1;
-						pthread_mutex_unlock(&pcd.lock);
-
-						pcd.ev_type = (int)t;
-						pcd.ev_region = (int)r;
-						pcd.ev_initial = (was_present < 0) ? 1 : 0;
-						pcd.ev = (int)PHYSICAL_DISC_EV_DISC_IN;
+						drv.event_disc_type = (int)t;
+						drv.event_region = (int)r;
+						drv.event_initial = (was_present < 0) ? 1 : 0;
+						drv.event_code = (int)PHYSICAL_DISC_EV_DISC_IN;
 						printf("DISC: disc detected: %s%s%s%s%s\n",
 							physical_disc_disc_name(t),
 							*physical_disc_region_name(r) ? " region " : "",
@@ -645,13 +465,13 @@ static void *prefetch_thread(void *arg)
 					}
 				}
 				else if (!present && was_present == 1) {
-					pthread_mutex_lock(&pcd.lock);
-					if (pcd.watch_present) pcd.watch_dirty = 1;
-					pcd.watch_present = 0;
-					pcd.watch_label[0] = 0;
-					pthread_mutex_unlock(&pcd.lock);
+					pthread_mutex_lock(&drv.ring_lock);
+					if (drv.seen_present) drv.seen_dirty = 1;
+					drv.seen_present = 0;
+					drv.seen_label[0] = 0;
+					pthread_mutex_unlock(&drv.ring_lock);
 
-					pcd.ev = (int)PHYSICAL_DISC_EV_DISC_OUT;
+					drv.event_code = (int)PHYSICAL_DISC_EV_DISC_OUT;
 					printf("DISC: disc removed\n");
 					was_present = 0;
 				}
@@ -663,217 +483,137 @@ static void *prefetch_thread(void *arg)
 			continue;
 		}
 
-		
-
-
-
-
-
-		
-
-
-		if (pcd.swap_enable && (pcd.leadout > 0 || swap_ejected)
-		    && now_ms() - last_swap_check >= SWAP_CHECK_MS) {
-			last_swap_check = now_ms();
+		if (drv.swap_armed && (drv.leadout_lba > 0 || swap_ejected)
+		    && clock_ms() - last_swap_check >= SWAP_POLL_MS) {
+			last_swap_check = clock_ms();
 			int present = physical_disc_disc_present();
 			if (swap_was_present == 1 && !present) {
-				swap_ejected = 1;                 
-				pcd.swap_ejected = 1;             
+				swap_ejected = 1;
+				drv.swap_out = 1;
 			}
 			else if (swap_ejected && present) {
-				
-
-
-
-
 				toc_t scratch;
-				pcd.swapping = 1;
-				pthread_mutex_lock(&pcd.io);
+				drv.mid_swap = 1;
+				pthread_mutex_lock(&drv.io_lock);
 				physical_disc_forget_disc();
 				int ok = !physical_disc_load_toc(&scratch);
-				pthread_mutex_unlock(&pcd.io);
-				
-
-
-
+				pthread_mutex_unlock(&drv.io_lock);
 
 				if (ok) {
-					
-
-
-
-
-
-
-
-
-
-
-					double w0 = now_ms();
+					double w0 = clock_ms();
 					int warm = 0;
 					int wlba = scratch.tracks[0].start;
-					while (now_ms() - w0 < 8000) {
-						if (!fill_cache(wlba, SYNC_BURST, 1)) { warm = 1; break; }
+					while (clock_ms() - w0 < 8000) {
+						if (!refill_ring(wlba, SYNC_IO_BURST, 1)) { warm = 1; break; }
 					}
 					if (warm) {
-						
-
-
-
 						for (int i = 1; i < 8; i++)
-							if (fill_cache(wlba + i * SYNC_BURST, SYNC_BURST, 1)) break;
-						if (pcd.trk[0].audio) { pcd.cursor[1] = wlba; pcd.wactive[1] = 1; }
-						printf("DISC: disc swap - drive awake in %.0f ms\n", now_ms() - w0);
+							if (refill_ring(wlba + i * SYNC_IO_BURST, SYNC_IO_BURST, 1)) break;
+						if (drv.span[0].is_audio) { drv.lane_cursor[1] = wlba; drv.lane_active[1] = 1; }
+						printf("DISC: disc swap - drive awake in %.0f ms\n", clock_ms() - w0);
 					}
 					ok = warm;
 				}
-				pcd.swapping = 0;
+				drv.mid_swap = 0;
 				if (ok) {
-					
-
-
-
-					FILE *sf = fopen(PHYSICAL_DISC_SWAPPED_MARKER, "w");
+					FILE *sf = fopen(SWAP_MARKER_PATH, "w");
 					if (sf) fclose(sf);
 
-					
-
-
-
-					pcd.swap_ejected = 0;
+					drv.swap_out = 0;
 					__sync_synchronize();
-					pcd.swap_ready = 1;
+					drv.swap_ready = 1;
 					swap_ejected = 0;
 					printf("DISC: disc swap - new toc loaded\n");
 				}
-				
-
-
 			}
 			swap_was_present = present;
 		}
 
-		
-
-
-
-
-
-		if (pcd.prewarm >= 0) {
-			if (pcd.last_win >= 0 || pcd.prewarm >= pcd.prewarm_end
-			    || pcd.consec_fail >= 8 || pcd.leadout <= 0) {
-				pcd.prewarm = -1;   
-			} else if (!pcd.sync_pending) {
-				int pw = pcd.prewarm;
-				fill_cache(pw, BURST, 0);
-				pcd.prewarm = pw + BURST;
-				last_io = now_ms();
+		if (drv.warmup_lba >= 0) {
+			if (drv.active_lane >= 0 || drv.warmup_lba >= drv.warmup_end
+			    || drv.fail_streak >= 8 || drv.leadout_lba <= 0) {
+				drv.warmup_lba = -1;
+			} else if (!drv.sync_busy) {
+				int pw = drv.warmup_lba;
+				refill_ring(pw, IO_BURST, 0);
+				drv.warmup_lba = pw + IO_BURST;
+				last_io = clock_ms();
 				continue;
 			}
 		}
 
-		
-
-		pthread_mutex_lock(&pcd.lock);
-		for (int n = 0; n < NWIN && target < 0; n++) {
-			int w = (rr + n) % NWIN;
-			if (!pcd.wactive[w]) continue;
-			int pos = pcd.cursor[w];
-			for (int i = 0; i < READAHEAD; i++) {
+		pthread_mutex_lock(&drv.ring_lock);
+		for (int n = 0; n < LANE_COUNT && target < 0; n++) {
+			int w = (rr + n) % LANE_COUNT;
+			if (!drv.lane_active[w]) continue;
+			int pos = drv.lane_cursor[w];
+			for (int i = 0; i < LOOKAHEAD_SPAN; i++) {
 				int lba = pos + i;
-				if (lba >= pcd.leadout) break;
-				if (win_of(lba) != w) break;   
-				if (slot_for(lba)->lba != lba) { target = lba; break; }
+				if (lba >= drv.leadout_lba) break;
+				if (lane_of(lba) != w) break;
+				if (entry_for(lba)->lba != lba) { target = lba; break; }
 			}
 		}
-		pthread_mutex_unlock(&pcd.lock);
-		rr = (rr + 1) % NWIN;
+		pthread_mutex_unlock(&drv.ring_lock);
+		rr = (rr + 1) % LANE_COUNT;
 
-		if (now_ms() - last_stats >= STATS_MS) {
-			if (pcd.st_hit || pcd.st_miss) stats_report();
-			last_stats = now_ms();
+		if (clock_ms() - last_stats >= STATS_PERIOD_MS) {
+			if (drv.hit_count || drv.miss_count) write_stats_log();
+			last_stats = clock_ms();
 		}
 
-		
-
-		if (pcd.sync_pending) {
+		if (drv.sync_busy) {
 			struct timespec ts = { 0, 2 * 1000 * 1000 };
 			nanosleep(&ts, NULL);
 			continue;
 		}
 
-		
-
-
-		if (pcd.consec_fail >= 8 && now_ms() - last_reattach > 5000) {
-			last_reattach = now_ms();
-			if (device_gone()) try_reattach();
-			else pcd.consec_fail = 0;   
+		if (drv.fail_streak >= 8 && clock_ms() - last_reattach > 5000) {
+			last_reattach = clock_ms();
+			if (drive_missing()) reattach_drive();
+			else drv.fail_streak = 0;
 		}
 
 		if (target < 0) {
-			
-
-
-
-
-
-
-			int lw = pcd.last_win;
-			
-
-
-
-
-
-			int klba = (lw >= 0) ? pcd.cursor[lw] : (pcd.leadout > 0 ? pcd.cursor[0] : -1);
-			if (klba >= pcd.leadout) klba = pcd.leadout - 1;  
-			if (pcd.leadout > 0 && klba >= 0
-			    && now_ms() - last_io >= KEEPALIVE_MS && !pcd.sync_pending) {
-				uint8_t sc[SLOT_SIZE];
-				int t = track_of(klba);
-				uint8_t fl = (t >= 0 && pcd.trk[t].audio) ? 0x10 : 0xF8;
-				pthread_mutex_lock(&pcd.io);
-				sg_read_cd(klba, 1, fl, 0, sc, BG_TIMEOUT_MS);
-				pthread_mutex_unlock(&pcd.io);
-				last_io = now_ms();
+			int lw = drv.active_lane;
+			int klba = (lw >= 0) ? drv.lane_cursor[lw] : (drv.leadout_lba > 0 ? drv.lane_cursor[0] : -1);
+			if (klba >= drv.leadout_lba) klba = drv.leadout_lba - 1;
+			if (drv.leadout_lba > 0 && klba >= 0
+			    && clock_ms() - last_io >= IDLE_KEEPALIVE_MS && !drv.sync_busy) {
+				uint8_t sc[ENTRY_SIZE];
+				int t = span_index(klba);
+				uint8_t fl = (t >= 0 && drv.span[t].is_audio) ? 0x10 : 0xF8;
+				pthread_mutex_lock(&drv.io_lock);
+				scsi_read_cd(klba, 1, fl, 0, sc, BG_IO_TIMEOUT_MS);
+				pthread_mutex_unlock(&drv.io_lock);
+				last_io = clock_ms();
 			}
 
-			
 			struct timespec ts = { 0, 20 * 1000 * 1000 };
 			nanosleep(&ts, NULL);
 			continue;
 		}
-		fill_cache(target, BURST, 0);
-		last_io = now_ms();
+		refill_ring(target, IO_BURST, 0);
+		last_io = clock_ms();
 	}
 	return NULL;
 }
 
-
-
-
 void physical_disc_set_device(const char *dev)
 {
-	if (dev && *dev) snprintf(pref_dev, sizeof(pref_dev), "%s", dev);
-	else pref_dev[0] = 0;
+	if (dev && *dev) snprintf(preferred_dev, sizeof(preferred_dev), "%s", dev);
+	else preferred_dev[0] = 0;
 }
 
-
-
-
-
-
-
-static int open_drive(char *out, int outsz)
+static int find_drive(char *out, int outsz)
 {
 	char path[64];
 	int spare = -1;
 
-	if (pref_dev[0]) {
-		int fd = open(pref_dev, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-		if (fd >= 0) { snprintf(out, outsz, "%s", pref_dev); return fd; }
-		printf("DISC: %s not available (%s), scanning\n", pref_dev, strerror(errno));
+	if (preferred_dev[0]) {
+		int fd = open(preferred_dev, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+		if (fd >= 0) { snprintf(out, outsz, "%s", preferred_dev); return fd; }
+		printf("DISC: %s not available (%s), scanning\n", preferred_dev, strerror(errno));
 	}
 
 	for (int i = 0; i < 8; i++) {
@@ -886,7 +626,7 @@ static int open_drive(char *out, int outsz)
 			if (spare >= 0) close(spare);
 			return fd;
 		}
-		
+
 		if (spare < 0) { spare = fd; snprintf(out, outsz, "%s", path); }
 		else close(fd);
 	}
@@ -897,135 +637,110 @@ int physical_disc_open(const char *dev)
 {
 	if (dev && *dev) physical_disc_set_device(dev);
 
-	if (pcd.fd >= 0) {
-		
-		if (!pref_dev[0] || !strcmp(pref_dev, cur_dev)) return 0;
+	if (drv.dev_fd >= 0) {
+		if (!preferred_dev[0] || !strcmp(preferred_dev, active_dev)) return 0;
 		physical_disc_close();
 	}
 
-	pcd.fd = open_drive(cur_dev, sizeof(cur_dev));
-	if (pcd.fd < 0) {
-		cur_dev[0] = 0;
+	drv.dev_fd = find_drive(active_dev, sizeof(active_dev));
+	if (drv.dev_fd < 0) {
+		active_dev[0] = 0;
 		printf("DISC: no cd-rom drive found (looked at /dev/sr0../dev/sr7)\n");
 		return -1;
 	}
 
-	pcd.cache = (slot_t *)malloc(sizeof(slot_t) * CACHE_SECTORS);
-	if (!pcd.cache) { close(pcd.fd); pcd.fd = -1; return -1; }
-	for (int i = 0; i < CACHE_SECTORS; i++) pcd.cache[i].lba = -1;
+	drv.ring = (cache_entry_t *)malloc(sizeof(cache_entry_t) * RING_SECTORS);
+	if (!drv.ring) { close(drv.dev_fd); drv.dev_fd = -1; return -1; }
+	for (int i = 0; i < RING_SECTORS; i++) drv.ring[i].lba = -1;
 
-	quiet_block_probes(cur_dev);
-	set_speed_cap();
+	silence_block_probes(active_dev);
+	apply_speed_cap();
 
-	pcd.leadout = 0;
-	pcd.ntrk = 0;
-	pcd.sub_ok = -1;
-	for (int w = 0; w < NWIN; w++) { pcd.cursor[w] = 0; pcd.wactive[w] = 0; }
-	pcd.last_win = -1;
-	pcd.prewarm = -1;
-	pcd.st_hit = pcd.st_miss = 0;
-	pcd.st_worst_ms = 0.0;
-	pcd.running = 1;
-	pthread_create(&pcd.thread, NULL, prefetch_thread, NULL);
-
-	
+	drv.leadout_lba = 0;
+	drv.track_count = 0;
+	drv.subch_ok = -1;
+	for (int w = 0; w < LANE_COUNT; w++) { drv.lane_cursor[w] = 0; drv.lane_active[w] = 0; }
+	drv.active_lane = -1;
+	drv.warmup_lba = -1;
+	drv.hit_count = drv.miss_count = 0;
+	drv.worst_wait_ms = 0.0;
+	drv.alive = 1;
+	pthread_create(&drv.io_thread, NULL, ring_worker_main, NULL);
 
 	cpu_set_t set;
 	CPU_ZERO(&set);
 	CPU_SET(0, &set);
 	CPU_SET(1, &set);
-	pthread_setaffinity_np(pcd.thread, sizeof(set), &set);
+	pthread_setaffinity_np(drv.io_thread, sizeof(set), &set);
 
-	printf("\x1b[32mDISC: opened %s\n\x1b[0m", cur_dev);
+	printf("\x1b[32mDISC: opened %s\n\x1b[0m", active_dev);
 	return 0;
 }
 
 int physical_disc_disc_present()
 {
-	if (pcd.fd < 0) return 0;
-	return ioctl(pcd.fd, CDROM_DRIVE_STATUS, CDSL_CURRENT) == CDS_DISC_OK;
+	if (drv.dev_fd < 0) return 0;
+	return ioctl(drv.dev_fd, CDROM_DRIVE_STATUS, CDSL_CURRENT) == CDS_DISC_OK;
 }
 
 int physical_disc_media_changed()
 {
-	if (pcd.fd < 0) return 0;
-	return ioctl(pcd.fd, CDROM_MEDIA_CHANGED, CDSL_CURRENT) > 0;
+	if (drv.dev_fd < 0) return 0;
+	return ioctl(drv.dev_fd, CDROM_MEDIA_CHANGED, CDSL_CURRENT) > 0;
 }
-
-
-
 
 int physical_disc_drive_busy()
 {
-	return pcd.fd >= 0;
+	return drv.dev_fd >= 0;
 }
 
 int physical_disc_swap_ejected(void)
 {
-	
-
-
-	return pcd.swap_enable && pcd.swap_ejected;
+	return drv.swap_armed && drv.swap_out;
 }
-
-
-
-
-
 
 int physical_disc_swap_happened(void)
 {
-	return unlink(PHYSICAL_DISC_SWAPPED_MARKER) == 0;
+	return unlink(SWAP_MARKER_PATH) == 0;
 }
-
-
 
 void physical_disc_swap_enable(int enable)
 {
-	pcd.swap_enable = enable ? 1 : 0;
-	if (enable) unlink(PHYSICAL_DISC_SWAPPED_MARKER);  
-	if (!enable) pcd.swap_ejected = 0;
-	if (!enable) pcd.swap_ready = 0;
+	drv.swap_armed = enable ? 1 : 0;
+	if (enable) unlink(SWAP_MARKER_PATH);
+	if (!enable) drv.swap_out = 0;
+	if (!enable) drv.swap_ready = 0;
 }
-
-
-
 
 int physical_disc_swap_consume(void)
 {
-	int r = pcd.swap_ready;
-	pcd.swap_ready = 0;
-	
-
-
+	int r = drv.swap_ready;
+	drv.swap_ready = 0;
 	if (r) __sync_synchronize();
 	return r;
 }
 
-
-
-
-static void probe_subchannel(int lba)
+static void detect_subchannel_support(int lba)
 {
-	uint8_t buf[SLOT_SIZE];
-	int t = track_of(lba);
-	uint8_t flags = (t >= 0 && pcd.trk[t].audio) ? 0x10 : 0xF8;
+	uint8_t buf[ENTRY_SIZE];
+	int t = span_index(lba);
+	uint8_t flags = (t >= 0 && drv.span[t].is_audio) ? 0x10 : 0xF8;
 
-	if (!sg_read_cd(lba, 1, flags, 1, buf, BG_TIMEOUT_MS)) { pcd.sub_ok = 1; return; }
-	if (!sg_read_cd(lba, 1, flags, 0, buf, BG_TIMEOUT_MS)) { pcd.sub_ok = 0; return; }
-	pcd.sub_ok = -1;                  
+	if (!scsi_read_cd(lba, 1, flags, 1, buf, BG_IO_TIMEOUT_MS)) { drv.subch_ok = 1; return; }
+	if (!scsi_read_cd(lba, 1, flags, 0, buf, BG_IO_TIMEOUT_MS)) { drv.subch_ok = 0; return; }
+	drv.subch_ok = -1;
 }
 
 int physical_disc_load_toc(toc_t *toc)
 {
 	struct cdrom_tochdr hdr;
-	if (pcd.fd < 0 || !physical_disc_disc_present()) return -1;
-	if (ioctl(pcd.fd, CDROMREADTOCHDR, &hdr) < 0) return -1;
+	if (drv.dev_fd < 0 || !physical_disc_disc_present()) return -1;
+	if (ioctl(drv.dev_fd, CDROMREADTOCHDR, &hdr) < 0) return -1;
 
 	memset(toc, 0, sizeof(toc_t));
-	pcd.leadout = 0;              
-	pcd.first_data_lba = -1;
-	pcd.ntrk = 0;
+	drv.leadout_lba = 0;
+	drv.data_lba0 = -1;
+	drv.track_count = 0;
 
 	int n = 0;
 	for (int t = hdr.cdth_trk0; t <= hdr.cdth_trk1 && n < 99; t++, n++) {
@@ -1033,31 +748,27 @@ int physical_disc_load_toc(toc_t *toc)
 		memset(&e, 0, sizeof(e));
 		e.cdte_track = t;
 		e.cdte_format = CDROM_LBA;
-		if (ioctl(pcd.fd, CDROMREADTOCENTRY, &e) < 0) return -1;
+		if (ioctl(drv.dev_fd, CDROMREADTOCENTRY, &e) < 0) return -1;
 
-		cd_track_t *trk = &toc->tracks[n];
-		trk->start = e.cdte_addr.lba;
-		trk->type = (e.cdte_ctrl & CDROM_DATA_TRACK) ? TT_MODE1 : TT_CDDA;
-		trk->sector_size = PHYSICAL_DISC_RAW;   
-		trk->offset = 0;
-		trk->index_num = 2;
-		trk->indexes[0] = 0;
-		trk->indexes[1] = 0;             
+		cd_track_t *out_trk = &toc->tracks[n];
+		out_trk->start = e.cdte_addr.lba;
+		out_trk->type = (e.cdte_ctrl & CDROM_DATA_TRACK) ? TT_MODE1 : TT_CDDA;
+		out_trk->sector_size = PHYSICAL_DISC_RAW;
+		out_trk->offset = 0;
+		out_trk->index_num = 2;
+		out_trk->indexes[0] = 0;
+		out_trk->indexes[1] = 0;
 
-		pcd.trk[n].start = trk->start;
-		pcd.trk[n].audio = (trk->type == TT_CDDA);
+		drv.span[n].lo = out_trk->start;
+		drv.span[n].is_audio = (out_trk->type == TT_CDDA);
 
-		if (trk->type != TT_CDDA && pcd.first_data_lba < 0)
-			pcd.first_data_lba = trk->start;
+		if (out_trk->type != TT_CDDA && drv.data_lba0 < 0)
+			drv.data_lba0 = out_trk->start;
 		if (n > 0) {
-			toc->tracks[n - 1].end = trk->start;
-			pcd.trk[n - 1].end = trk->start;
+			toc->tracks[n - 1].end = out_trk->start;
+			drv.span[n - 1].hi = out_trk->start;
 		}
 	}
-
-	
-
-
 
 	if (n < 1) {
 		printf("DISC: drive reported no tracks (%d-%d)\n", hdr.cdth_trk0, hdr.cdth_trk1);
@@ -1068,85 +779,76 @@ int physical_disc_load_toc(toc_t *toc)
 	memset(&lead, 0, sizeof(lead));
 	lead.cdte_track = CDROM_LEADOUT;
 	lead.cdte_format = CDROM_LBA;
-	if (ioctl(pcd.fd, CDROMREADTOCENTRY, &lead) < 0) return -1;
+	if (ioctl(drv.dev_fd, CDROMREADTOCENTRY, &lead) < 0) return -1;
 
 	toc->tracks[n - 1].end = lead.cdte_addr.lba;
 	toc->last = n;
 	toc->end = lead.cdte_addr.lba;
 	toc->sectorSize = PHYSICAL_DISC_RAW;
-	toc->phys = 1;                            
+	toc->phys = 1;
 
-	pcd.trk[n - 1].end = lead.cdte_addr.lba;
-	pcd.ntrk = n;
+	drv.span[n - 1].hi = lead.cdte_addr.lba;
+	drv.track_count = n;
 
-	
-	pthread_mutex_lock(&pcd.lock);
-	for (int i = 0; i < CACHE_SECTORS; i++) pcd.cache[i].lba = -1;
-	pthread_mutex_unlock(&pcd.lock);
+	pthread_mutex_lock(&drv.ring_lock);
+	for (int i = 0; i < RING_SECTORS; i++) drv.ring[i].lba = -1;
+	pthread_mutex_unlock(&drv.ring_lock);
 
-	set_speed_cap();      
+	apply_speed_cap();
 
-	pcd.sub_ok = -1;
-	probe_subchannel(toc->tracks[0].start + 16);
+	drv.subch_ok = -1;
+	detect_subchannel_support(toc->tracks[0].start + 16);
 
-	
+	for (int w = 0; w < LANE_COUNT; w++) { drv.lane_cursor[w] = 0; drv.lane_active[w] = 0; }
+	drv.lane_cursor[0] = toc->tracks[0].start;
+	drv.active_lane = -1;
+	drv.hit_count = drv.miss_count = drv.bad_count = drv.bad_logged = 0;
+	drv.worst_wait_ms = drv.worst_io_ms = 0.0;
 
+	drv.leadout_lba = lead.cdte_addr.lba;
 
+	drv.warmup_lba = -1;
+	if (!drv.mid_swap && drv.track_count) {
+		int pw_end = toc->tracks[0].start + WARMUP_SECTORS;
+		if (pw_end > drv.span[0].hi) pw_end = drv.span[0].hi;
+		if (pw_end > drv.leadout_lba) pw_end = drv.leadout_lba;
 
-
-
-	for (int w = 0; w < NWIN; w++) { pcd.cursor[w] = 0; pcd.wactive[w] = 0; }
-	pcd.cursor[0] = toc->tracks[0].start;
-	pcd.last_win = -1;
-	pcd.st_hit = pcd.st_miss = pcd.st_bad = pcd.st_bad_logged = 0;
-	pcd.st_worst_ms = pcd.st_worst_io_ms = 0.0;
-
-	pcd.leadout = lead.cdte_addr.lba;         
-
-	
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-	pcd.prewarm = -1;
-	if (!pcd.swapping && pcd.ntrk && pcd.trk[0].audio) {
-		int pw_end = toc->tracks[0].start + PREWARM_SECTORS;
-		if (pw_end > pcd.trk[0].end) pw_end = pcd.trk[0].end;  
-		if (pw_end > pcd.leadout)    pw_end = pcd.leadout;
-		
-
-
-
-
-		pcd.cursor[1] = toc->tracks[0].start;
-		pcd.wactive[1] = 1;
-		pcd.prewarm_end = pw_end;
+		int w = lane_of(toc->tracks[0].start);
+		drv.lane_cursor[w] = toc->tracks[0].start;
+		drv.lane_active[w] = 1;
+		drv.warmup_end = pw_end;
 		__sync_synchronize();
-		pcd.prewarm = toc->tracks[0].start;
+		drv.warmup_lba = toc->tracks[0].start;
 	}
 
 	printf("\x1b[32mDISC: toc loaded, %d tracks, leadout %d, subchannel %s\n\x1b[0m",
-		n, pcd.leadout,
-		pcd.sub_ok == 1 ? "yes" : pcd.sub_ok == 0 ? "no" : "unknown");
+		n, drv.leadout_lba,
+		drv.subch_ok == 1 ? "yes" : drv.subch_ok == 0 ? "no" : "unknown");
 	return 0;
 }
 
+int physical_disc_current_toc(toc_t *toc)
+{
+	if (!toc || drv.dev_fd < 0 || drv.mid_swap || drv.track_count < 1 || drv.leadout_lba <= 0) return -1;
 
-
-
-
+	memset(toc, 0, sizeof(toc_t));
+	for (int i = 0; i < drv.track_count; i++) {
+		cd_track_t *out_trk = &toc->tracks[i];
+		out_trk->start = drv.span[i].lo;
+		out_trk->end = drv.span[i].hi;
+		out_trk->type = drv.span[i].is_audio ? TT_CDDA : TT_MODE1;
+		out_trk->sector_size = PHYSICAL_DISC_RAW;
+		out_trk->offset = 0;
+		out_trk->index_num = 2;
+		out_trk->indexes[0] = 0;
+		out_trk->indexes[1] = 0;
+	}
+	toc->last = drv.track_count;
+	toc->end = drv.leadout_lba;
+	toc->sectorSize = PHYSICAL_DISC_RAW;
+	toc->phys = 1;
+	return 0;
+}
 
 int physical_disc_toc_audio_only(const toc_t *toc)
 {
@@ -1158,159 +860,126 @@ int physical_disc_toc_audio_only(const toc_t *toc)
 	return 1;
 }
 
-int physical_disc_current_toc(toc_t *toc)
-{
-	
-	if (!toc || pcd.fd < 0 || pcd.swapping || pcd.ntrk < 1 || pcd.leadout <= 0) return -1;
-
-	memset(toc, 0, sizeof(toc_t));
-	for (int i = 0; i < pcd.ntrk; i++) {
-		cd_track_t *trk = &toc->tracks[i];
-		trk->start = pcd.trk[i].start;
-		trk->end = pcd.trk[i].end;
-		trk->type = pcd.trk[i].audio ? TT_CDDA : TT_MODE1;
-		trk->sector_size = PHYSICAL_DISC_RAW;   
-		trk->offset = 0;
-		trk->index_num = 2;
-		trk->indexes[0] = 0;
-		trk->indexes[1] = 0;
-	}
-	toc->last = pcd.ntrk;
-	toc->end = pcd.leadout;
-	toc->sectorSize = PHYSICAL_DISC_RAW;
-	toc->phys = 1;
-	return 0;
-}
-
 void physical_disc_prewarm_blocking(void)
 {
-	if (pcd.fd < 0 || pcd.ntrk < 1 || pcd.leadout <= 0) return;
-	int lba = pcd.trk[0].start;
-	double start = now_ms();
+	if (drv.dev_fd < 0 || drv.track_count < 1 || drv.leadout_lba <= 0) return;
+	int lba = drv.span[0].lo;
+	double start = clock_ms();
 	int ready = 0;
-	while (now_ms() - start < 8000)
+	while (clock_ms() - start < 8000)
 	{
-		if (!fill_cache(lba, SYNC_BURST, 1))
+		if (!refill_ring(lba, SYNC_IO_BURST, 1))
 		{
 			ready = 1;
 			break;
 		}
 	}
 	if (!ready) return;
-	int span = pcd.leadout - lba;
-	if (span > 8 * SYNC_BURST)
+	int remaining = drv.leadout_lba - lba;
+	if (remaining > 8 * SYNC_IO_BURST)
 	{
 		static const int points[] = { 2, 3, 1 };
 		for (unsigned i = 0; i < sizeof(points) / sizeof(points[0]); i++)
 		{
-			int target = lba + (int)(((int64_t)span * points[i]) / 4);
-			if (target + SYNC_BURST > pcd.leadout) target = pcd.leadout - SYNC_BURST;
-			fill_cache(target, SYNC_BURST, 1);
+			int target = lba + (int)(((int64_t)remaining * points[i]) / 4);
+			if (target + SYNC_IO_BURST > drv.leadout_lba) target = drv.leadout_lba - SYNC_IO_BURST;
+			refill_ring(target, SYNC_IO_BURST, 1);
 		}
 	}
 	for (int i = 1; i < 8; i++)
 	{
-		if (fill_cache(lba + i * SYNC_BURST, SYNC_BURST, 1)) break;
+		if (refill_ring(lba + i * SYNC_IO_BURST, SYNC_IO_BURST, 1)) break;
 	}
-	pcd.cursor[0] = lba;
-	pcd.wactive[0] = 1;
+	drv.lane_cursor[0] = lba;
+	drv.lane_active[0] = 1;
 }
 
 void physical_disc_seek_hint(int lba)
 {
-	if (lba < 0 || !pcd.ntrk) return;
+	if (lba < 0 || !drv.track_count) return;
 
-	
-	int w = win_of(lba);
-	pcd.cursor[w] = lba;
-	pcd.wactive[w] = 1;
+	int w = lane_of(lba);
+	drv.lane_cursor[w] = lba;
+	drv.lane_active[w] = 1;
 }
 
-
-
-static int read_sector_impl(int lba, uint8_t *dst, uint8_t *sub96, int *sub_valid)
+static int fetch_sector(int lba, uint8_t *dst, uint8_t *sub96, int *sub_valid, int mark_active)
 {
 	if (sub_valid) *sub_valid = 0;
 
-	if (pcd.fd < 0 || pcd.swapping || lba < 0 || lba >= pcd.leadout) {
-		
-
-
-
-
+	if (drv.dev_fd < 0 || drv.mid_swap || lba < 0 || lba >= drv.leadout_lba) {
 		memset(dst, 0, PHYSICAL_DISC_RAW);
 		if (sub96) memset(sub96, 0, PHYSICAL_DISC_SUB);
 		return -1;
 	}
 
-	int w = win_of(lba);
-	pcd.wactive[w] = 1;
-	pcd.last_win = w;        
+	int w = lane_of(lba);
+	drv.lane_active[w] = 1;
+	if (mark_active) drv.active_lane = w;
 
-	pthread_mutex_lock(&pcd.lock);
-	slot_t *s = slot_for(lba);
-	int hit = (s->lba == lba);
+	pthread_mutex_lock(&drv.ring_lock);
+	cache_entry_t *e = entry_for(lba);
+	int hit = (e->lba == lba);
 	if (hit) {
-		memcpy(dst, s->data, PHYSICAL_DISC_RAW);
-		if (sub96) memcpy(sub96, s->data + PHYSICAL_DISC_RAW, PHYSICAL_DISC_SUB);
-		if (sub_valid) *sub_valid = s->has_sub;
+		memcpy(dst, e->data, PHYSICAL_DISC_RAW);
+		if (sub96) memcpy(sub96, e->data + PHYSICAL_DISC_RAW, PHYSICAL_DISC_SUB);
+		if (sub_valid) *sub_valid = e->sub_present;
 	}
-	pthread_mutex_unlock(&pcd.lock);
+	pthread_mutex_unlock(&drv.ring_lock);
 
 	if (hit) {
-		
-		if (lba >= pcd.cursor[w]) pcd.cursor[w] = lba + 1;
-		pcd.st_hit++;
+		if (lba >= drv.lane_cursor[w]) drv.lane_cursor[w] = lba + 1;
+		drv.hit_count++;
 		return 0;
 	}
 
-	
-	double t0 = now_ms();
-	pcd.sync_pending++;
-	int fr = fill_cache(lba, SYNC_BURST, 1);
-	pcd.sync_pending--;
+	double t0 = clock_ms();
+	drv.sync_busy++;
+	int fr = refill_ring(lba, SYNC_IO_BURST, 1);
+	drv.sync_busy--;
 
-	pcd.st_miss++;
-	double d = now_ms() - t0;
-	if (d > pcd.st_worst_ms) pcd.st_worst_ms = d;
+	drv.miss_count++;
+	double d = clock_ms() - t0;
+	if (d > drv.worst_wait_ms) drv.worst_wait_ms = d;
 
 	if (!fr) {
-		pthread_mutex_lock(&pcd.lock);
-		s = slot_for(lba);
-		hit = (s->lba == lba);
+		pthread_mutex_lock(&drv.ring_lock);
+		e = entry_for(lba);
+		hit = (e->lba == lba);
 		if (hit) {
-			memcpy(dst, s->data, PHYSICAL_DISC_RAW);
-			if (sub96) memcpy(sub96, s->data + PHYSICAL_DISC_RAW, PHYSICAL_DISC_SUB);
-			if (sub_valid) *sub_valid = s->has_sub;
+			memcpy(dst, e->data, PHYSICAL_DISC_RAW);
+			if (sub96) memcpy(sub96, e->data + PHYSICAL_DISC_RAW, PHYSICAL_DISC_SUB);
+			if (sub_valid) *sub_valid = e->sub_present;
 		}
-		pthread_mutex_unlock(&pcd.lock);
+		pthread_mutex_unlock(&drv.ring_lock);
 
 		if (hit) {
-			pcd.cursor[w] = lba + 1;
+			drv.lane_cursor[w] = lba + 1;
 			return 0;
 		}
 	}
 
-	
-
-
-
 	memset(dst, 0, PHYSICAL_DISC_RAW);
 	if (sub96) memset(sub96, 0, PHYSICAL_DISC_SUB);
-	pcd.st_bad++;
-	pcd.cursor[w] = lba;
+	drv.bad_count++;
+	drv.lane_cursor[w] = lba;
 	return 0;
 }
 
 int physical_disc_read_sector(int lba, uint8_t *dst, uint8_t *sub96)
 {
-	return read_sector_impl(lba, dst, sub96, NULL);
+	return fetch_sector(lba, dst, sub96, NULL, 1);
+}
+
+int physical_disc_probe_sector(int lba, uint8_t *dst)
+{
+	return fetch_sector(lba, dst, NULL, NULL, 0);
 }
 
 int physical_disc_read_sector_sub(int lba, uint8_t *dst, uint8_t *sub96)
 {
 	int valid = 0;
-	if (read_sector_impl(lba, dst, sub96, &valid)) return 0;
+	if (fetch_sector(lba, dst, sub96, &valid, 1)) return 0;
 	return valid;
 }
 
@@ -1319,32 +988,27 @@ int physical_disc_read_data2048(int lba, uint8_t *dst)
 	uint8_t raw[PHYSICAL_DISC_RAW];
 	if (physical_disc_read_sector(lba, raw, NULL)) return -1;
 
-	
 	int off = (raw[15] == 2) ? 24 : 16;
 	memcpy(dst, raw + off, 2048);
 	return 0;
 }
-
-
 
 physical_disc_disc_t physical_disc_identify()
 {
 	uint8_t raw[PHYSICAL_DISC_RAW * 2];
 
 	if (!physical_disc_disc_present()) return PHYSICAL_DISC_DISC_NONE;
-	if (pcd.first_data_lba < 0) {
-		
+	if (drv.data_lba0 < 0) {
 		toc_t tmp;
 		if (physical_disc_load_toc(&tmp)) return PHYSICAL_DISC_DISC_NONE;
-		if (pcd.first_data_lba < 0) return PHYSICAL_DISC_DISC_AUDIO;
+		if (drv.data_lba0 < 0) return PHYSICAL_DISC_DISC_AUDIO;
 	}
 
-	int base = pcd.first_data_lba;
+	int base = drv.data_lba0;
 
 	if (!physical_disc_read_sector(base, raw, NULL)) {
 		if (!memcmp(raw + 16, "SEGADISCSYSTEM", 14)) return PHYSICAL_DISC_DISC_MEGACD;
 		if (!memcmp(raw + 16, "SEGA SEGASATURN", 15)) return PHYSICAL_DISC_DISC_SATURN;
-		
 
 		if (raw[16] == 0x01 && raw[17] == 0x5A && raw[18] == 0x5A
 			&& raw[19] == 0x5A && raw[20] == 0x5A && raw[21] == 0x5A)
@@ -1353,16 +1017,12 @@ physical_disc_disc_t physical_disc_identify()
 
 	if (!physical_disc_read_sector(base + 16, raw, NULL)) {
 		uint8_t *iso = raw + 16;
-		if (memcmp(iso + 1, "CD001", 5)) iso = raw + 24;   
+		if (memcmp(iso + 1, "CD001", 5)) iso = raw + 24;
 		if (!memcmp(iso + 1, "CD001", 5)) {
 			if (!memcmp(iso + 8, "PLAYSTATION", 11)) return PHYSICAL_DISC_DISC_PSX;
 			if (!memcmp(iso + 8, "NGCD", 4)) return PHYSICAL_DISC_DISC_NEOGEO;
 		}
 	}
-
-	
-
-
 
 	for (int s = 16; s <= 40; s++) {
 		uint8_t user[2048];
@@ -1384,9 +1044,6 @@ physical_disc_region_t physical_disc_region_from_md_header(const uint8_t *hdr, i
 {
 	if (!hdr || len < 0x1F3) return PHYSICAL_DISC_REGION_UNKNOWN;
 
-	
-
-
 	if (memcmp(hdr + 0x100, "SEGA", 4)) return PHYSICAL_DISC_REGION_UNKNOWN;
 
 	const char *f = (const char *)hdr + 0x1F0;
@@ -1399,19 +1056,12 @@ physical_disc_region_t physical_disc_region_from_md_header(const uint8_t *hdr, i
 		else if (c != ' ' && c != 0) junk = 1;
 	}
 
-	
-
-
-
-
-
 	if (!junk && (has_j || has_u || has_e)) {
 		if (has_u) return PHYSICAL_DISC_REGION_US;
 		if (has_e) return PHYSICAL_DISC_REGION_EU;
 		return PHYSICAL_DISC_REGION_JP;
 	}
 
-	
 	int v = -1;
 	if (f[0] >= '0' && f[0] <= '9') v = f[0] - '0';
 	else if (f[0] >= 'A' && f[0] <= 'F') v = f[0] - 'A' + 10;
@@ -1429,13 +1079,13 @@ physical_disc_region_t physical_disc_region()
 	uint8_t user[2048];
 
 	if (!physical_disc_disc_present()) return PHYSICAL_DISC_REGION_UNKNOWN;
-	if (pcd.first_data_lba < 0) {
+	if (drv.data_lba0 < 0) {
 		toc_t tmp;
 		if (physical_disc_load_toc(&tmp)) return PHYSICAL_DISC_REGION_UNKNOWN;
-		if (pcd.first_data_lba < 0) return PHYSICAL_DISC_REGION_UNKNOWN;
+		if (drv.data_lba0 < 0) return PHYSICAL_DISC_REGION_UNKNOWN;
 	}
 
-	if (physical_disc_read_data2048(pcd.first_data_lba, user)) return PHYSICAL_DISC_REGION_UNKNOWN;
+	if (physical_disc_read_data2048(drv.data_lba0, user)) return PHYSICAL_DISC_REGION_UNKNOWN;
 	return physical_disc_region_from_md_header(user, sizeof(user));
 }
 
@@ -1449,13 +1099,6 @@ const char *physical_disc_region_name(physical_disc_region_t r)
 	}
 }
 
-
-
-
-
-
-
-
 int physical_disc_disc_label(char *out, int outsz)
 {
 	uint8_t user[2048];
@@ -1464,17 +1107,15 @@ int physical_disc_disc_label(char *out, int outsz)
 	out[0] = 0;
 
 	if (!physical_disc_disc_present()) return 0;
-	if (pcd.first_data_lba < 0) {
+	if (drv.data_lba0 < 0) {
 		toc_t tmp;
 		if (physical_disc_load_toc(&tmp)) return 0;
-		if (pcd.first_data_lba < 0) return 0;   
+		if (drv.data_lba0 < 0) return 0;
 	}
 
-	
-	if (physical_disc_read_data2048(pcd.first_data_lba + 16, user)) return 0;
+	if (physical_disc_read_data2048(drv.data_lba0 + 16, user)) return 0;
 	if (user[0] != 1 || memcmp(user + 1, "CD001", 5)) return 0;
 
-	
 	char lbl[33];
 	memcpy(lbl, user + 40, 32);
 	lbl[32] = 0;
@@ -1485,28 +1126,14 @@ int physical_disc_disc_label(char *out, int outsz)
 
 	for (int i = 0; i < end; i++) {
 		if (lbl[i] == '_') lbl[i] = ' ';
-		
-
 		else if (lbl[i] < 0x20 || (uint8_t)lbl[i] > 0x7E) lbl[i] = ' ';
 	}
-
-	
-
 
 	if (!strcasecmp(lbl, "PLAYSTATION")) return 0;
 
 	snprintf(out, outsz, "%s", lbl);
 	return strlen(out);
 }
-
-
-
-
-
-
-
-
-
 
 int physical_disc_disc_serial(char *out, int outsz)
 {
@@ -1516,13 +1143,11 @@ int physical_disc_disc_serial(char *out, int outsz)
 	};
 	if (!out || outsz < 2) return 0;
 	out[0] = 0;
-	if (pcd.first_data_lba < 0) return 0;
-
-	
+	if (drv.data_lba0 < 0) return 0;
 
 	for (int s = 16; s <= 64; s++) {
 		uint8_t user[2048];
-		if (physical_disc_read_data2048(pcd.first_data_lba + s, user)) continue;
+		if (physical_disc_read_data2048(drv.data_lba0 + s, user)) continue;
 
 		for (int p = 0; p < (int)(sizeof(pfx) / sizeof(pfx[0])); p++) {
 			uint8_t *m = (uint8_t *)memmem(user, sizeof(user), pfx[p], 4);
@@ -1532,13 +1157,13 @@ int physical_disc_disc_serial(char *out, int outsz)
 			char *semi = (char *)memmem(start, sizeof(user) - (start - (char *)user), ";", 1);
 			if (!semi) continue;
 			int len = (int)(semi - start);
-			if (len < 8 || len > 11) continue;   
+			if (len < 8 || len > 11) continue;
 
 			char id[16];
 			memcpy(id, start, len);
 			id[len] = 0;
-			if (id[4] == '_') id[4] = '-';        
-			char *dot = strchr(id, '.');          
+			if (id[4] == '_') id[4] = '-';
+			char *dot = strchr(id, '.');
 			if (dot) memmove(dot, dot + 1, strlen(dot));
 			snprintf(out, outsz, "%s", id);
 			return (int)strlen(out);
@@ -1547,8 +1172,7 @@ int physical_disc_disc_serial(char *out, int outsz)
 	return 0;
 }
 
-
-static int physical_disc_sanitize_name(const char *src, int len, char *out, int outsz)
+static int sanitize_name(const char *src, int len, char *out, int outsz)
 {
 	if (!src || !out || outsz < 2) return 0;
 	int n = 0;
@@ -1571,7 +1195,7 @@ static int physical_disc_sanitize_name(const char *src, int len, char *out, int 
 	return n;
 }
 
-static uint64_t physical_disc_hash64(uint64_t h, uint64_t v)
+static uint64_t fnv_mix64(uint64_t h, uint64_t v)
 {
 	for (int i = 0; i < 8; i++)
 	{
@@ -1581,7 +1205,7 @@ static uint64_t physical_disc_hash64(uint64_t h, uint64_t v)
 	return h;
 }
 
-static int physical_disc_toc_uuid(physical_disc_disc_t type, char *out, int outsz)
+static int derive_toc_uuid(physical_disc_disc_t type, char *out, int outsz)
 {
 	if (!out || outsz < 37) return 0;
 	toc_t toc;
@@ -1591,17 +1215,17 @@ static int physical_disc_toc_uuid(physical_disc_disc_t type, char *out, int outs
 	}
 	uint64_t h1 = 1469598103934665603ULL;
 	uint64_t h2 = 1099511628211ULL;
-	h1 = physical_disc_hash64(h1, (uint64_t)type);
-	h2 = physical_disc_hash64(h2, (uint64_t)type ^ 0x9E3779B97F4A7C15ULL);
-	h1 = physical_disc_hash64(h1, (uint64_t)toc.last);
-	h2 = physical_disc_hash64(h2, (uint64_t)toc.end);
+	h1 = fnv_mix64(h1, (uint64_t)type);
+	h2 = fnv_mix64(h2, (uint64_t)type ^ 0x9E3779B97F4A7C15ULL);
+	h1 = fnv_mix64(h1, (uint64_t)toc.last);
+	h2 = fnv_mix64(h2, (uint64_t)toc.end);
 	for (int i = 0; i < toc.last; i++)
 	{
 		uint64_t v = ((uint64_t)(uint32_t)toc.tracks[i].start << 32) |
 			((uint64_t)(uint16_t)toc.tracks[i].type << 16) |
 			(uint16_t)(toc.tracks[i].end - toc.tracks[i].start);
-		h1 = physical_disc_hash64(h1, v);
-		h2 = physical_disc_hash64(h2, v ^ ((uint64_t)i << 56));
+		h1 = fnv_mix64(h1, v);
+		h2 = fnv_mix64(h2, v ^ ((uint64_t)i << 56));
 	}
 	uint8_t b[16];
 	for (int i = 0; i < 8; i++) b[i] = (uint8_t)(h1 >> (56 - i * 8));
@@ -1621,27 +1245,26 @@ int physical_disc_save_name(physical_disc_disc_t type, char *out, int outsz)
 	out[0] = 0;
 	uint8_t user[2048];
 	char id[64] = {};
-	if (pcd.first_data_lba < 0)
+	if (drv.data_lba0 < 0)
 	{
 		toc_t toc;
-		if (physical_disc_load_toc(&toc) || pcd.first_data_lba < 0) return physical_disc_toc_uuid(type, out, outsz);
+		if (physical_disc_load_toc(&toc) || drv.data_lba0 < 0) return derive_toc_uuid(type, out, outsz);
 	}
 	if (type == PHYSICAL_DISC_DISC_PSX)
 	{
-		if (physical_disc_disc_serial(id, sizeof(id)) && physical_disc_sanitize_name(id, strlen(id), out, outsz)) return strlen(out);
+		if (physical_disc_disc_serial(id, sizeof(id)) && sanitize_name(id, strlen(id), out, outsz)) return strlen(out);
 	}
-	else if (type == PHYSICAL_DISC_DISC_SATURN && !physical_disc_read_data2048(pcd.first_data_lba, user))
+	else if (type == PHYSICAL_DISC_DISC_SATURN && !physical_disc_read_data2048(drv.data_lba0, user))
 	{
-		if (!memcmp(user, "SEGA SEGASATURN", 15) && physical_disc_sanitize_name((char *)user + 0x20, 10, out, outsz)) return strlen(out);
+		if (!memcmp(user, "SEGA SEGASATURN", 15) && sanitize_name((char *)user + 0x20, 10, out, outsz)) return strlen(out);
 	}
-	else if (type == PHYSICAL_DISC_DISC_MEGACD && !physical_disc_read_data2048(pcd.first_data_lba, user))
+	else if (type == PHYSICAL_DISC_DISC_MEGACD && !physical_disc_read_data2048(drv.data_lba0, user))
 	{
-		if (!memcmp(user, "SEGADISCSYSTEM", 14) && physical_disc_sanitize_name((char *)user + 0x180, 14, out, outsz)) return strlen(out);
+		if (!memcmp(user, "SEGADISCSYSTEM", 14) && sanitize_name((char *)user + 0x180, 14, out, outsz)) return strlen(out);
 	}
-	if (physical_disc_disc_label(id, sizeof(id)) && physical_disc_sanitize_name(id, strlen(id), out, outsz)) return strlen(out);
-	return physical_disc_toc_uuid(type, out, outsz);
+	if (physical_disc_disc_label(id, sizeof(id)) && sanitize_name(id, strlen(id), out, outsz)) return strlen(out);
+	return derive_toc_uuid(type, out, outsz);
 }
-
 
 const char *physical_disc_console_name(physical_disc_disc_t t)
 {
@@ -1673,114 +1296,94 @@ const char *physical_disc_disc_name(physical_disc_disc_t t)
 
 int physical_disc_watch_start(void)
 {
-	
-
 	physical_disc_acoustic_pause();
 	if (physical_disc_open(NULL)) return -1;
-	pcd.ev = (int)PHYSICAL_DISC_EV_NONE;
-	pcd.watch_mode = 1;
-	printf("DISC: watching %s for a disc\n", cur_dev);
+	drv.event_code = (int)PHYSICAL_DISC_EV_NONE;
+	drv.watching = 1;
+	printf("DISC: watching %s for a disc\n", active_dev);
 	return 0;
 }
 
 void physical_disc_watch_stop(void)
 {
-	pcd.watch_mode = 0;
-	pcd.ev = (int)PHYSICAL_DISC_EV_NONE;
+	drv.watching = 0;
+	drv.event_code = (int)PHYSICAL_DISC_EV_NONE;
 
-	
-
-	pthread_mutex_lock(&pcd.lock);
-	pcd.watch_present = 0;
-	pcd.watch_type = 0;
-	pcd.watch_label[0] = 0;
-	pcd.watch_dirty = 1;
-	pthread_mutex_unlock(&pcd.lock);
+	pthread_mutex_lock(&drv.ring_lock);
+	drv.seen_present = 0;
+	drv.seen_type = 0;
+	drv.seen_label[0] = 0;
+	drv.seen_dirty = 1;
+	pthread_mutex_unlock(&drv.ring_lock);
 
 	physical_disc_close();
-
-	
-
 
 	physical_disc_acoustic_resume();
 }
 
 int physical_disc_watching(void)
 {
-	return pcd.watch_mode;
+	return drv.watching;
 }
-
-
-
-
 
 int physical_disc_menu_status(char *name, int namesz, physical_disc_disc_t *type)
 {
-	pthread_mutex_lock(&pcd.lock);
-	int present = pcd.watch_present;
-	int t = pcd.watch_type;
-	
+	pthread_mutex_lock(&drv.ring_lock);
+	int present = drv.seen_present;
+	int t = drv.seen_type;
 
-
-	if (name && namesz > 0) snprintf(name, namesz, "%s", pcd.watch_label);
-	pthread_mutex_unlock(&pcd.lock);
+	if (name && namesz > 0) snprintf(name, namesz, "%s", drv.seen_label);
+	pthread_mutex_unlock(&drv.ring_lock);
 
 	if (type) *type = (physical_disc_disc_t)t;
 	return present;
 }
 
-
-
-
 int physical_disc_menu_dirty(void)
 {
-	pthread_mutex_lock(&pcd.lock);
-	int d = pcd.watch_dirty;
-	pcd.watch_dirty = 0;
-	pthread_mutex_unlock(&pcd.lock);
+	pthread_mutex_lock(&drv.ring_lock);
+	int d = drv.seen_dirty;
+	drv.seen_dirty = 0;
+	pthread_mutex_unlock(&drv.ring_lock);
 	return d;
 }
 
 physical_disc_event_t physical_disc_poll_event(physical_disc_disc_t *type, physical_disc_region_t *region, int *initial)
 {
-	physical_disc_event_t e = (physical_disc_event_t)pcd.ev;
+	physical_disc_event_t e = (physical_disc_event_t)drv.event_code;
 	if (e == PHYSICAL_DISC_EV_NONE) return e;
 
-	
-
-	if (type) *type = (physical_disc_disc_t)pcd.ev_type;
-	if (region) *region = (physical_disc_region_t)pcd.ev_region;
-	if (initial) *initial = pcd.ev_initial;
-	pcd.ev = (int)PHYSICAL_DISC_EV_NONE;
+	if (type) *type = (physical_disc_disc_t)drv.event_disc_type;
+	if (region) *region = (physical_disc_region_t)drv.event_region;
+	if (initial) *initial = drv.event_initial;
+	drv.event_code = (int)PHYSICAL_DISC_EV_NONE;
 	return e;
 }
 
-
-
 void physical_disc_forget_disc(void)
 {
-	pcd.first_data_lba = -1;
-	pcd.leadout = 0;
-	pcd.ntrk = 0;
-	if (pcd.cache) {
-		pthread_mutex_lock(&pcd.lock);
-		for (int i = 0; i < CACHE_SECTORS; i++) pcd.cache[i].lba = -1;
-		pthread_mutex_unlock(&pcd.lock);
+	drv.data_lba0 = -1;
+	drv.leadout_lba = 0;
+	drv.track_count = 0;
+	if (drv.ring) {
+		pthread_mutex_lock(&drv.ring_lock);
+		for (int i = 0; i < RING_SECTORS; i++) drv.ring[i].lba = -1;
+		pthread_mutex_unlock(&drv.ring_lock);
 	}
 }
 
 void physical_disc_close()
 {
-	if (pcd.fd < 0) return;
-	pcd.running = 0;
-	pthread_join(pcd.thread, NULL);
-	free(pcd.cache);
-	pcd.cache = NULL;
-	close(pcd.fd);
-	pcd.fd = -1;
-	pcd.leadout = 0;
-	pcd.ntrk = 0;
-	pcd.first_data_lba = -1;
-	pcd.native_speed = 0;
-	cur_dev[0] = 0;
+	if (drv.dev_fd < 0) return;
+	drv.alive = 0;
+	pthread_join(drv.io_thread, NULL);
+	free(drv.ring);
+	drv.ring = NULL;
+	close(drv.dev_fd);
+	drv.dev_fd = -1;
+	drv.leadout_lba = 0;
+	drv.track_count = 0;
+	drv.data_lba0 = -1;
+	drv.want_native_speed = 0;
+	active_dev[0] = 0;
 }

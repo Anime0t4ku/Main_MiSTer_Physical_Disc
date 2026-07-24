@@ -22,16 +22,23 @@
 #include "../../achievements.h"
 #endif
 
-static unsigned long pending_mount = 0;
-static unsigned long mount_deadline = 0;
-static unsigned long p3do_prepare_timer = 0;
-static int p3do_prepare_state = 0;
-static int p3do_prepare_lba = 0;
-static toc_t p3do_prepare_toc;
-static uint8_t p3do_prepare_buf[PHYSICAL_DISC_RAW];
-static int pce_startup_osd_suppression = 0;
+enum
+{
+	SPINUP_IDLE = 0,
+	SPINUP_SETTLING = 1,
+	SPINUP_READY = 2,
+};
 
-static int p3do_sector_ready(const uint8_t *data)
+static unsigned long mount_retry_at = 0;
+static unsigned long mount_giveup_at = 0;
+static unsigned long spinup_settle_at = 0;
+static int spinup_stage = SPINUP_IDLE;
+static int spinup_probe_lba = 0;
+static toc_t spinup_toc;
+static uint8_t spinup_probe_buf[PHYSICAL_DISC_RAW];
+static int suppress_pce_boot_osd = 0;
+
+static int sector_has_data(const uint8_t *data)
 {
 	for (int i = 0; i < PHYSICAL_DISC_RAW; i++)
 	{
@@ -40,44 +47,58 @@ static int p3do_sector_ready(const uint8_t *data)
 	return 0;
 }
 
+static void begin_mount_window(void)
+{
+	unsigned int wait_seconds = cfg.physical_disc_mount_delay;
+	if (wait_seconds < 8) wait_seconds = 8;
+	mount_giveup_at = GetTimer(wait_seconds * 1000);
+}
+
+static void clear_spinup_state(void)
+{
+	spinup_stage = SPINUP_IDLE;
+	spinup_probe_lba = 0;
+	spinup_settle_at = 0;
+}
+
 int physical_disc_mount_current_core(void)
 {
-	int recognised = 1;
-	int mounted = 0;
+	int known = 1;
+	int ok = 0;
 
-	if (is_megacd()) mounted = mcd_set_image(0, PHYSICAL_DISC_SENTINEL);
-	else if (is_psx()) mounted = psx_mount_cd(1, 1, PHYSICAL_DISC_SENTINEL);
-	else if (is_saturn()) mounted = saturn_set_image(0, PHYSICAL_DISC_SENTINEL);
+	if (is_megacd()) ok = mcd_set_image(0, PHYSICAL_DISC_SENTINEL);
+	else if (is_psx()) ok = psx_mount_cd(1, 1, PHYSICAL_DISC_SENTINEL);
+	else if (is_saturn()) ok = saturn_set_image(0, PHYSICAL_DISC_SENTINEL);
 	else if (is_neogeo())
 	{
 		neocd_set_en(1);
-		mounted = neocd_set_image(PHYSICAL_DISC_SENTINEL);
+		ok = neocd_set_image(PHYSICAL_DISC_SENTINEL);
 	}
-	else if (is_3do()) mounted = p3do_set_image(0, PHYSICAL_DISC_SENTINEL);
+	else if (is_3do()) ok = p3do_set_image(0, PHYSICAL_DISC_SENTINEL);
 	else if (is_pce())
 	{
 		pcecd_set_image(0, PHYSICAL_DISC_SENTINEL);
-		mounted = pcecdd.loaded;
-		if (mounted)
+		ok = pcecdd.loaded;
+		if (ok)
 		{
 			pcecd_reset();
 			user_io_send_buttons(1);
 		}
 	}
-	else if (is_cdi()) mounted = cdi_mount_cd(0, PHYSICAL_DISC_SENTINEL);
-	else recognised = 0;
+	else if (is_cdi()) ok = cdi_mount_cd(0, PHYSICAL_DISC_SENTINEL);
+	else known = 0;
 
-	if (!recognised)
+	if (!known)
 	{
 		printf("DISC: core '%s' has no physical disc support yet\n", user_io_get_core_name());
 		return 0;
 	}
 
 #ifdef HAS_RCHEEVOS
-	if (mounted > 0) achievements_load_game(PHYSICAL_DISC_SENTINEL, 0);
+	if (ok > 0) achievements_load_game(PHYSICAL_DISC_SENTINEL, 0);
 #endif
 
-	return mounted;
+	return ok;
 }
 
 int physical_disc_swap_current_core(void)
@@ -101,24 +122,20 @@ void physical_disc_launch_startup(void)
 	{
 		physical_disc_launch_cancel();
 		physical_disc_close();
-		pending_mount = 0;
-		mount_deadline = 0;
+		mount_retry_at = 0;
+		mount_giveup_at = 0;
 		return;
 	}
 	physical_disc_prepare_environment();
 
-	pce_startup_osd_suppression = is_pce();
+	suppress_pce_boot_osd = is_pce();
 
-	unsigned int wait_seconds = cfg.physical_disc_mount_delay;
-	if (wait_seconds < 8) wait_seconds = 8;
-	mount_deadline = GetTimer(wait_seconds * 1000);
+	begin_mount_window();
 
 	if (is_3do())
 	{
-		p3do_prepare_state = 0;
-		p3do_prepare_lba = 0;
-		p3do_prepare_timer = 0;
-		pending_mount = GetTimer(1);
+		clear_spinup_state();
+		mount_retry_at = GetTimer(1);
 		return;
 	}
 
@@ -126,90 +143,88 @@ void physical_disc_launch_startup(void)
 	{
 		if (physical_disc_mount_current_core())
 		{
-			pending_mount = 0;
-			mount_deadline = 0;
+			mount_retry_at = 0;
+			mount_giveup_at = 0;
 			return;
 		}
 		usleep(100000);
 	}
-	while (!CheckTimer(mount_deadline));
+	while (!CheckTimer(mount_giveup_at));
 
-	pending_mount = GetTimer(100);
+	mount_retry_at = GetTimer(100);
 }
 
 void physical_disc_launch_poll(void)
 {
-	if (!pending_mount || !CheckTimer(pending_mount)) return;
+	if (!mount_retry_at || !CheckTimer(mount_retry_at)) return;
 
 	if (is_3do())
 	{
-		if (!p3do_prepare_state)
+		if (spinup_stage == SPINUP_IDLE)
 		{
-			memset(&p3do_prepare_toc, 0, sizeof(p3do_prepare_toc));
-			if (!physical_disc_open(NULL) && !physical_disc_load_toc(&p3do_prepare_toc))
+			memset(&spinup_toc, 0, sizeof(spinup_toc));
+			if (!physical_disc_open(NULL) && !physical_disc_load_toc(&spinup_toc))
 			{
-				p3do_prepare_state = 1;
-				p3do_prepare_lba = p3do_prepare_toc.tracks[0].start;
-				p3do_prepare_timer = GetTimer(500);
-				pending_mount = GetTimer(10);
+				spinup_stage = SPINUP_SETTLING;
+				spinup_probe_lba = spinup_toc.tracks[0].start;
+				spinup_settle_at = GetTimer(500);
+				mount_retry_at = GetTimer(10);
 				return;
 			}
 			physical_disc_close();
 		}
-		else if (p3do_prepare_state == 1)
+		else if (spinup_stage == SPINUP_SETTLING)
 		{
-			if (!CheckTimer(p3do_prepare_timer))
+			if (!CheckTimer(spinup_settle_at))
 			{
-				pending_mount = GetTimer(10);
+				mount_retry_at = GetTimer(10);
 				return;
 			}
 
-			if (p3do_prepare_lba < p3do_prepare_toc.tracks[0].start + 32)
+			if (spinup_probe_lba < spinup_toc.tracks[0].start + 32)
 			{
-				if (physical_disc_read_sector(p3do_prepare_lba, p3do_prepare_buf, NULL) ||
-					(p3do_prepare_lba == p3do_prepare_toc.tracks[0].start && !p3do_sector_ready(p3do_prepare_buf)))
+				if (physical_disc_read_sector(spinup_probe_lba, spinup_probe_buf, NULL) ||
+					(spinup_probe_lba == spinup_toc.tracks[0].start && !sector_has_data(spinup_probe_buf)))
 				{
 					physical_disc_close();
-					p3do_prepare_state = 0;
-					pending_mount = GetTimer(100);
+					clear_spinup_state();
+					mount_retry_at = GetTimer(100);
 					return;
 				}
-				p3do_prepare_lba++;
-				pending_mount = GetTimer(1);
+				spinup_probe_lba++;
+				mount_retry_at = GetTimer(1);
 				return;
 			}
 
-			p3do_prepare_state = 2;
+			spinup_stage = SPINUP_READY;
 		}
 
-		if (p3do_prepare_state == 2 && physical_disc_mount_current_core())
+		if (spinup_stage == SPINUP_READY && physical_disc_mount_current_core())
 		{
-			pending_mount = 0;
-			mount_deadline = 0;
-			p3do_prepare_state = 0;
-			p3do_prepare_timer = 0;
+			mount_retry_at = 0;
+			mount_giveup_at = 0;
+			clear_spinup_state();
 			return;
 		}
 	}
 	else if (physical_disc_mount_current_core())
 	{
-		pending_mount = 0;
-		mount_deadline = 0;
+		mount_retry_at = 0;
+		mount_giveup_at = 0;
 		return;
 	}
 
-	if (!mount_deadline || CheckTimer(mount_deadline))
+	if (!mount_giveup_at || CheckTimer(mount_giveup_at))
 	{
 		physical_disc_close();
-		pending_mount = 0;
-		mount_deadline = 0;
-		p3do_prepare_state = 0;
-		p3do_prepare_timer = 0;
+		mount_retry_at = 0;
+		mount_giveup_at = 0;
+		clear_spinup_state();
 		Info("Disc could not be read", 5000);
 		return;
 	}
 
-	pending_mount = GetTimer(100);
+	mount_retry_at = GetTimer(100);
 }
 
 int physical_disc_is_menu_row(const char *name)
@@ -231,19 +246,17 @@ int physical_disc_launch_load_disc(void)
 
 int physical_disc_launch_busy(void)
 {
-	return pending_mount != 0;
+	return mount_retry_at != 0;
 }
 
 void physical_disc_launch_cancel(void)
 {
-	pce_startup_osd_suppression = 0;
-	if (p3do_prepare_state) physical_disc_close();
-	pending_mount = 0;
-	mount_deadline = 0;
-	p3do_prepare_state = 0;
-	p3do_prepare_timer = 0;
+	suppress_pce_boot_osd = 0;
+	if (spinup_stage) physical_disc_close();
+	mount_retry_at = 0;
+	mount_giveup_at = 0;
+	clear_spinup_state();
 }
-
 
 void physical_disc_launch_reset(void)
 {
@@ -254,19 +267,15 @@ void physical_disc_launch_reset(void)
 	physical_disc_close();
 	physical_disc_acoustic_config(cfg.physical_disc_acoustic);
 
-	unsigned int wait_seconds = cfg.physical_disc_mount_delay;
-	if (wait_seconds < 8) wait_seconds = 8;
-	mount_deadline = GetTimer(wait_seconds * 1000);
-	p3do_prepare_state = 0;
-	p3do_prepare_lba = 0;
-	p3do_prepare_timer = 0;
-	pending_mount = GetTimer(100);
+	begin_mount_window();
+	clear_spinup_state();
+	mount_retry_at = GetTimer(100);
 }
 
 int physical_disc_launch_consume_startup_osd_suppression(void)
 {
-	if (!pce_startup_osd_suppression) return 0;
-	pce_startup_osd_suppression = 0;
+	if (!suppress_pce_boot_osd) return 0;
+	suppress_pce_boot_osd = 0;
 	return 1;
 }
 
