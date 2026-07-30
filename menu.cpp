@@ -64,6 +64,7 @@
 #include "recent.h"
 #include "support.h"
 #include "support/physical_disc/physical_disc_launch.h"
+#include "support/megadrive/mdplus.h"
 #include "bootcore.h"
 #include "ide.h"
 #include "profiling.h"
@@ -1230,6 +1231,13 @@ void HandleUI(void)
 
 	if (mgl->done && physical_disc_launch_consume_startup_osd_suppression())
 	{
+		menustate = MENU_NONE1;
+		OsdDisable();
+	}
+
+	if (mdplus_cd_suppress_osd())
+	{
+		c = 0;
 		menustate = MENU_NONE1;
 		OsdDisable();
 	}

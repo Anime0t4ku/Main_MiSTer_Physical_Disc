@@ -10,11 +10,20 @@
 #include <unistd.h>
 #include <ctype.h>
 #include <time.h>
+#include <dirent.h>
+#include <limits.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/mount.h>
+#include <sys/ioctl.h>
+#include <linux/cdrom.h>
 
 #include "../../user_io.h"
 #include "../../fpga_io.h"
 #include "../../shmem.h"
 #include "../../file_io.h"
+#include "../../menu.h"
+#include "../../hardware.h"
 #include "mdplus.h"
 
 // Ring buffer in DDRAM (must match mdp_audio.sv DDRAM_BASE)
@@ -215,6 +224,126 @@ static void close_wav()
 	}
 }
 
+
+static int cd_mdplus_state = 0;
+static unsigned long cd_mdplus_osd_suppress_until = 0;
+static int cd_mdplus_drive = -1;
+static const char cd_mdplus_mount_path[] = "/tmp/cd-mdplus";
+
+static int cd_mdplus_active()
+{
+	const char *name = user_io_get_core_name();
+	return name && !strcmp(name, "CD-MDPlus");
+}
+
+static int cd_mdplus_name_compare(const void *a, const void *b)
+{
+	return strcasecmp((const char*)a, (const char*)b);
+}
+
+static int cd_mdplus_has_matching_cue(const char *name)
+{
+	char cue[PATH_MAX];
+	snprintf(cue, sizeof(cue), "%s/%s", cd_mdplus_mount_path, name);
+	char *dot = strrchr(cue, '.');
+	if (!dot) return 0;
+	strcpy(dot, ".cue");
+	return !access(cue, R_OK);
+}
+
+static int cd_mdplus_find_rom(char *path, size_t size)
+{
+	DIR *dir = opendir(cd_mdplus_mount_path);
+	if (!dir) return 0;
+	char names[64][NAME_MAX + 1];
+	int count = 0;
+	struct dirent *entry;
+	while ((entry = readdir(dir)) && count < 64)
+	{
+		const char *ext = strrchr(entry->d_name, '.');
+		if (!ext || strcasecmp(ext, ".md")) continue;
+		if (!cd_mdplus_has_matching_cue(entry->d_name)) continue;
+		strncpy(names[count], entry->d_name, NAME_MAX);
+		names[count][NAME_MAX] = 0;
+		count++;
+	}
+	closedir(dir);
+	if (!count) return 0;
+	qsort(names, count, sizeof(names[0]), cd_mdplus_name_compare);
+	snprintf(path, size, "%s/%s", cd_mdplus_mount_path, names[0]);
+	return 1;
+}
+
+static int cd_mdplus_open_disc(char *rom, size_t size)
+{
+	mkdir(cd_mdplus_mount_path, 0755);
+	umount2(cd_mdplus_mount_path, MNT_DETACH);
+	char device[32] = {};
+	for (int i = 0; i < 8; i++)
+	{
+		snprintf(device, sizeof(device), "/dev/sr%d", i);
+		if (!access(device, R_OK)) break;
+		device[0] = 0;
+	}
+	if (!device[0]) return 0;
+	if (mount(device, cd_mdplus_mount_path, "iso9660", MS_RDONLY | MS_NOSUID | MS_NODEV, "iocharset=utf8") &&
+		mount(device, cd_mdplus_mount_path, "iso9660", MS_RDONLY | MS_NOSUID | MS_NODEV, NULL)) return 0;
+	cd_mdplus_drive = open(device, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+	if (cd_mdplus_drive >= 0) ioctl(cd_mdplus_drive, CDROM_SELECT_SPEED, 0);
+	return cd_mdplus_find_rom(rom, size);
+}
+
+static void cd_mdplus_close_disc()
+{
+	close_wav();
+	memset(&mdp, 0, sizeof(mdp));
+	if (cd_mdplus_drive >= 0)
+	{
+		ioctl(cd_mdplus_drive, CDROM_SELECT_SPEED, 4);
+		close(cd_mdplus_drive);
+		cd_mdplus_drive = -1;
+	}
+	umount2(cd_mdplus_mount_path, MNT_DETACH);
+	cd_mdplus_state = 0;
+	cd_mdplus_osd_suppress_until = 0;
+}
+
+int mdplus_cd_suppress_osd()
+{
+	if (!cd_mdplus_active() || !cd_mdplus_osd_suppress_until) return 0;
+	if (CheckTimer(cd_mdplus_osd_suppress_until))
+	{
+		cd_mdplus_osd_suppress_until = 0;
+		return 0;
+	}
+	return 1;
+}
+
+void mdplus_cd_session_poll()
+{
+	if (!cd_mdplus_active())
+	{
+		if (cd_mdplus_state) cd_mdplus_close_disc();
+		return;
+	}
+	if (cd_mdplus_state) return;
+	cd_mdplus_state = 1;
+	char rom[PATH_MAX] = {};
+	if (!cd_mdplus_open_disc(rom, sizeof(rom)))
+	{
+		cd_mdplus_close_disc();
+		cd_mdplus_state = -1;
+		return;
+	}
+	cd_mdplus_state = 2;
+	if (!user_io_file_tx(rom, (2 << 6) | 1, 1, 0, 0, 0)) cd_mdplus_close_disc();
+	else
+	{
+		cd_mdplus_osd_suppress_until = GetTimer(2000);
+		MenuHide();
+	}
+}
+
 // Ring buffer streaming
 // Reads PCM from the WAV and writes into DDRAM. Handles CUE-based
 // looping and end-of-track drain (500ms to let FPGA FIFO empty).
@@ -314,7 +443,7 @@ void mdplus_init(const char *rom_path)
 	close_wav();
 	memset(&mdp, 0, sizeof(mdp));
 
-	if (strcasecmp(user_io_get_core_name(1), "MegaDrive"))
+	if (strcasecmp(user_io_get_core_name(1), "MegaDrive") && !cd_mdplus_active())
 		return;
 
 	char full_rom_path[1024];
