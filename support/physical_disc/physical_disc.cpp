@@ -993,6 +993,55 @@ int physical_disc_read_data2048(int lba, uint8_t *dst)
 	return 0;
 }
 
+static uint32_t iso_le32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static int iso_root_features(int base, int *has_mdplus, int *has_snes)
+{
+	uint8_t pvd[2048];
+	*has_mdplus = 0;
+	*has_snes = 0;
+	if (physical_disc_read_data2048(base + 16, pvd)) return 0;
+	if (pvd[0] != 1 || memcmp(pvd + 1, "CD001", 5)) return 0;
+	const uint8_t *root = pvd + 156;
+	if (root[0] < 34) return 0;
+	uint32_t extent = iso_le32(root + 2);
+	uint32_t size = iso_le32(root + 10);
+	if (!extent || !size) return 0;
+	char md_names[64][128];
+	char cue_names[64][128];
+	int md_count = 0, cue_count = 0;
+	uint32_t done = 0;
+	while (done < size && done < 1024 * 1024) {
+		uint8_t sec[2048];
+		if (physical_disc_read_data2048(base + extent + done / 2048, sec)) break;
+		int off = 0;
+		while (off < 2048 && done + off < size) {
+			int len = sec[off];
+			if (!len) break;
+			if (off + len > 2048 || len < 34) break;
+			int nlen = sec[off + 32];
+			if (nlen > 0 && nlen < 120 && off + 33 + nlen <= 2048) {
+				char name[128];
+				memcpy(name, sec + off + 33, nlen);
+				name[nlen] = 0;
+				char *semi = strchr(name, ';');
+				if (semi) *semi = 0;
+				char *dot = strrchr(name, '.');
+				if (dot && (!strcasecmp(dot, ".sfc") || !strcasecmp(dot, ".smc"))) *has_snes = 1;
+				if (dot && !strcasecmp(dot, ".md") && md_count < 64) { *dot = 0; snprintf(md_names[md_count++], 128, "%s", name); }
+				else if (dot && !strcasecmp(dot, ".cue") && cue_count < 64) { *dot = 0; snprintf(cue_names[cue_count++], 128, "%s", name); }
+			}
+			off += len;
+		}
+		done += 2048;
+	}
+	for (int i = 0; i < md_count; i++) for (int j = 0; j < cue_count; j++) if (!strcasecmp(md_names[i], cue_names[j])) *has_mdplus = 1;
+	return 1;
+}
+
 physical_disc_disc_t physical_disc_identify()
 {
 	uint8_t raw[PHYSICAL_DISC_RAW * 2];
@@ -1005,38 +1054,38 @@ physical_disc_disc_t physical_disc_identify()
 	}
 
 	int base = drv.data_lba0;
+	int has_mdplus = 0, has_snes = 0;
+	iso_root_features(base, &has_mdplus, &has_snes);
+	if (has_mdplus) return PHYSICAL_DISC_DISC_MDPLUS;
 
 	if (!physical_disc_read_sector(base, raw, NULL)) {
 		if (!memcmp(raw + 16, "SEGADISCSYSTEM", 14)) return PHYSICAL_DISC_DISC_MEGACD;
 		if (!memcmp(raw + 16, "SEGA SEGASATURN", 15)) return PHYSICAL_DISC_DISC_SATURN;
-
-		if (raw[16] == 0x01 && raw[17] == 0x5A && raw[18] == 0x5A
-			&& raw[19] == 0x5A && raw[20] == 0x5A && raw[21] == 0x5A)
-			return PHYSICAL_DISC_DISC_3DO;
+		if (raw[16] == 0x01 && raw[17] == 0x5A && raw[18] == 0x5A && raw[19] == 0x5A && raw[20] == 0x5A && raw[21] == 0x5A) return PHYSICAL_DISC_DISC_3DO;
 	}
 
 	if (!physical_disc_read_sector(base + 16, raw, NULL)) {
 		uint8_t *iso = raw + 16;
-		if (memcmp(iso + 1, "CD001", 5)) iso = raw + 24;
+		if (memcmp(iso + 1, "CD001", 5) && memcmp(iso + 1, "CD-I", 4)) iso = raw + 24;
 		if (!memcmp(iso + 1, "CD001", 5)) {
 			if (!memcmp(iso + 8, "PLAYSTATION", 11)) return PHYSICAL_DISC_DISC_PSX;
 			if (!memcmp(iso + 8, "NGCD", 4)) return PHYSICAL_DISC_DISC_NEOGEO;
 		}
+		if (!memcmp(iso + 1, "CD-I", 4)) return PHYSICAL_DISC_DISC_CDI;
 	}
 
 	for (int s = 16; s <= 40; s++) {
 		uint8_t user[2048];
 		if (physical_disc_read_data2048(base + s, user)) continue;
 		if (memmem(user, sizeof(user), "IPL.TXT", 7)) return PHYSICAL_DISC_DISC_NEOGEO;
+		if (memmem(user, sizeof(user), "CDI_APPL", 8)) return PHYSICAL_DISC_DISC_CDI;
 	}
 
-	if (!physical_disc_read_sector(base, raw, NULL) &&
-	    !physical_disc_read_sector(base + 1, raw + PHYSICAL_DISC_RAW, NULL)) {
-		for (int off = 0; off < (int)sizeof(raw) - 24; off++)
-			if (!memcmp(raw + off, "PC Engine CD-ROM SYSTEM", 23))
-				return PHYSICAL_DISC_DISC_PCECD;
+	if (!physical_disc_read_sector(base, raw, NULL) && !physical_disc_read_sector(base + 1, raw + PHYSICAL_DISC_RAW, NULL)) {
+		for (int off = 0; off < (int)sizeof(raw) - 24; off++) if (!memcmp(raw + off, "PC Engine CD-ROM SYSTEM", 23)) return PHYSICAL_DISC_DISC_PCECD;
 	}
 
+	if (has_snes) return PHYSICAL_DISC_DISC_SNES;
 	return PHYSICAL_DISC_DISC_UNKNOWN;
 }
 
@@ -1288,6 +1337,9 @@ const char *physical_disc_disc_name(physical_disc_disc_t t)
 	case PHYSICAL_DISC_DISC_PCECD:  return "TurboGrafx CD";
 	case PHYSICAL_DISC_DISC_NEOGEO: return "NeoGeo CD";
 	case PHYSICAL_DISC_DISC_3DO:    return "3DO";
+	case PHYSICAL_DISC_DISC_CDI:    return "CD-i";
+	case PHYSICAL_DISC_DISC_MDPLUS: return "MD+";
+	case PHYSICAL_DISC_DISC_SNES:   return "SNES MSU-1";
 	case PHYSICAL_DISC_DISC_AUDIO:  return "Audio CD";
 	case PHYSICAL_DISC_DISC_NONE:   return "No Disc";
 	default:                 return "Unknown";
