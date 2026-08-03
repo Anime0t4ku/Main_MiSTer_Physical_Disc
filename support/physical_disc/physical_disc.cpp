@@ -204,6 +204,7 @@ static int scsi_read_cd(int lba, int count, uint8_t flags, int with_sub, uint8_t
 	int sector_len = PHYSICAL_DISC_RAW + (with_sub ? PHYSICAL_DISC_SUB : 0);
 
 	cdb[0] = 0xBE;
+	if (flags == 0x10) cdb[1] = 0x04;
 	cdb[2] = (lba >> 24) & 0xFF;
 	cdb[3] = (lba >> 16) & 0xFF;
 	cdb[4] = (lba >> 8) & 0xFF;
@@ -280,12 +281,6 @@ static int refill_ring(int lba, int count, int sync)
 			with_sub = 0;
 			r = 0;
 		}
-	}
-
-	if (r && sync) {
-		double dt = clock_ms() - io0;
-		if (dt > drv.worst_io_ms) drv.worst_io_ms = dt;
-		return -1;
 	}
 
 	if (r) {
@@ -729,6 +724,147 @@ static void detect_subchannel_support(int lba)
 	if (!scsi_read_cd(lba, 1, flags, 1, buf, BG_IO_TIMEOUT_MS)) { drv.subch_ok = 1; return; }
 	if (!scsi_read_cd(lba, 1, flags, 0, buf, BG_IO_TIMEOUT_MS)) { drv.subch_ok = 0; return; }
 	drv.subch_ok = -1;
+}
+
+static int scsi_read_raw_subq(int lba, uint8_t *sub)
+{
+	uint8_t cdb[12] = { 0 };
+	uint8_t sense[32];
+	struct sg_io_hdr io;
+
+	cdb[0] = 0xBE;
+	cdb[2] = (lba >> 24) & 0xFF;
+	cdb[3] = (lba >> 16) & 0xFF;
+	cdb[4] = (lba >> 8) & 0xFF;
+	cdb[5] = lba & 0xFF;
+	cdb[8] = 1;
+	cdb[10] = 0x01;
+
+	memset(&io, 0, sizeof(io));
+	io.interface_id = 'S';
+	io.cmd_len = 12;
+	io.cmdp = cdb;
+	io.dxfer_direction = SG_DXFER_FROM_DEV;
+	io.dxfer_len = PHYSICAL_DISC_SUB;
+	io.dxferp = sub;
+	io.sbp = sense;
+	io.mx_sb_len = sizeof(sense);
+	io.timeout = BG_IO_TIMEOUT_MS;
+
+	if (ioctl(drv.dev_fd, SG_IO, &io) < 0) return -1;
+	if (io.status || io.host_status || io.driver_status) return -1;
+	return 0;
+}
+
+static void raw_subq_decode(const uint8_t *raw, uint8_t *q)
+{
+	for (int b = 0; b < 12; b++) {
+		uint8_t v = 0;
+		for (int bit = 0; bit < 8; bit++)
+			v = (uint8_t)((v << 1) | ((raw[b * 8 + bit] >> 6) & 1));
+		q[b] = v;
+	}
+}
+
+static int bcd_value(uint8_t v)
+{
+	int hi = (v >> 4) & 0x0F;
+	int lo = v & 0x0F;
+	if (hi > 9 || lo > 9) return -1;
+	return hi * 10 + lo;
+}
+
+static int physical_disc_q_index00(int lba, int track)
+{
+	if (lba < 0 || drv.dev_fd < 0) return 0;
+
+	uint8_t raw[PHYSICAL_DISC_SUB];
+	uint8_t q[12];
+	pthread_mutex_lock(&drv.io_lock);
+	int r = scsi_read_raw_subq(lba, raw);
+	pthread_mutex_unlock(&drv.io_lock);
+	if (r) return -1;
+
+	raw_subq_decode(raw, q);
+	if ((q[0] & 0x0F) != 1) return 0;
+
+	int am = bcd_value(q[7]);
+	int as = bcd_value(q[8]);
+	int af = bcd_value(q[9]);
+	if (am < 0 || as < 0 || af < 0 || as >= 60 || af >= 75) return 0;
+	int q_lba = (am * 60 + as) * 75 + af - 150;
+	if (q_lba < lba - 1 || q_lba > lba + 1) return 0;
+
+	return bcd_value(q[1]) == track && bcd_value(q[2]) == 0;
+}
+
+int physical_disc_psx_enrich_toc(toc_t *toc)
+{
+	if (!toc || !toc->phys || toc->last < 2 || drv.dev_fd < 0) return 0;
+
+	int found = 0;
+	int q_supported = 0;
+
+	for (int i = 1; i < toc->last; i++) {
+		int index1 = toc->tracks[i].start;
+		int track = i + 1;
+		int state = physical_disc_q_index00(index1 - 1, track);
+		if (state < 0) {
+			if (!q_supported && !found)
+				printf("DISC: PSX pregap scan unavailable on this drive, using basic TOC\n");
+			break;
+		}
+		q_supported = 1;
+		if (!state) continue;
+
+		int lower = toc->tracks[i - 1].start;
+		int last_inside = index1 - 1;
+		int first_outside = lower - 1;
+		int distance = 2;
+
+		while (index1 - distance >= lower) {
+			int probe = index1 - distance;
+			state = physical_disc_q_index00(probe, track);
+			if (state != 1) {
+				first_outside = probe;
+				break;
+			}
+			last_inside = probe;
+			if (probe == lower) break;
+			if (distance > (index1 - lower) / 2) distance = index1 - lower;
+			else distance *= 2;
+			if (!distance) break;
+		}
+
+		int lo = first_outside + 1;
+		int hi = last_inside;
+		while (lo < hi) {
+			int mid = lo + (hi - lo) / 2;
+			state = physical_disc_q_index00(mid, track);
+			if (state == 1) hi = mid;
+			else lo = mid + 1;
+		}
+
+		if (lo >= index1 || physical_disc_q_index00(lo, track) != 1) continue;
+
+		int pregap = index1 - lo;
+		toc->tracks[i].start = lo;
+		toc->tracks[i].indexes[1] = pregap;
+		toc->tracks[i - 1].end = lo;
+		drv.span[i].lo = lo;
+		drv.span[i - 1].hi = lo;
+		found++;
+		printf("DISC: PSX track %02d INDEX 00 at LBA %d, INDEX 01 at %d (%d sectors)\n",
+			track, lo, index1, pregap);
+	}
+
+	if (found && drv.ring) {
+		pthread_mutex_lock(&drv.ring_lock);
+		for (int i = 0; i < RING_SECTORS; i++) drv.ring[i].lba = -1;
+		pthread_mutex_unlock(&drv.ring_lock);
+	}
+
+	return found;
 }
 
 int physical_disc_load_toc(toc_t *toc)

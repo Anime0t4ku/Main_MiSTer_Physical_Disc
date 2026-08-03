@@ -43,6 +43,8 @@ static unsigned long suppress_neogeo_boot_osd_until = 0;
 static unsigned long menu_poll_at = 0;
 static int menu_detecting = 0;
 static int menu_environment_ready = 0;
+static int menu_boot_checked = 0;
+static int menu_ignore_boot_disc = 0;
 #define PHYSICAL_DISC_HANDLED_FILE "/tmp/physical_disc_menu_handled"
 #define PHYSICAL_DISC_MGL_DIR "/media/fat/_Physical Disc Cores"
 
@@ -360,9 +362,41 @@ int physical_disc_launch_menu_tick(void)
 		menu_environment_ready = 1;
 	}
 
+	if (physical_disc_open(NULL))
+	{
+		physical_disc_close();
+		unlink(PHYSICAL_DISC_HANDLED_FILE);
+		menu_detecting = 0;
+		return 0;
+	}
+
+	int disc_present = physical_disc_disc_present();
+	if (!menu_boot_checked)
+	{
+		menu_boot_checked = 1;
+		if (disc_present)
+		{
+			menu_ignore_boot_disc = 1;
+			printf("DISC: startup disc detected, Auto Disc Discovery waits for a new insertion\n");
+		}
+	}
+
+	if (menu_ignore_boot_disc)
+	{
+		if (!disc_present)
+		{
+			menu_ignore_boot_disc = 0;
+			unlink(PHYSICAL_DISC_HANDLED_FILE);
+			printf("DISC: startup disc removed, Auto Disc Discovery armed\n");
+		}
+		physical_disc_close();
+		menu_detecting = 0;
+		return 0;
+	}
+
 	toc_t toc;
 	memset(&toc, 0, sizeof(toc));
-	if (physical_disc_open(NULL) || physical_disc_load_toc(&toc))
+	if (!disc_present || physical_disc_load_toc(&toc))
 	{
 		physical_disc_close();
 		unlink(PHYSICAL_DISC_HANDLED_FILE);

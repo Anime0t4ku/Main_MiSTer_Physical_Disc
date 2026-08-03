@@ -357,8 +357,9 @@ static void apply_disc_bias(toc_t *table)
 	for (int i = 0; i < table->last; i++)
 	{
 		int len = table->tracks[i].end - table->tracks[i].start;
+		int index1 = table->tracks[i].indexes[1];
 
-		table->tracks[i].indexes[1] = i ? 0 : 150;
+		table->tracks[i].indexes[1] = i ? index1 : 150;
 		table->tracks[i].pregap = 0;
 		table->tracks[i].start += 150;
 		table->tracks[i].end = table->tracks[i].start + len - 1;
@@ -382,6 +383,7 @@ static int load_phys(toc_t *table)
 		return 0;
 	}
 
+	physical_disc_psx_enrich_toc(table);
 	apply_disc_bias(table);
 	return 1;
 }
@@ -523,6 +525,7 @@ static toc_t toc = {};
 
 static int s_swap_fidx = 1, s_swap_sidx = 1;
 static region_t s_swap_region = UNKNOWN;
+static int s_swap_eject_notified = 0;
 #define CD_SECTOR_LEN 2352
 
 int psx_chd_hunksize()
@@ -766,7 +769,7 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 	int loaded = 0;
 	int phys = !strcmp(filename, PHYSICAL_DISC_SENTINEL);
 	physical_disc_swap_enable(0);   
-	if (phys) { s_swap_fidx = f_index; s_swap_sidx = s_index; }
+	if (phys) { s_swap_fidx = f_index; s_swap_sidx = s_index; s_swap_eject_notified = 0; }
 
 	if (strlen(filename))
 	{
@@ -931,6 +934,7 @@ static void psx_swap_apply()
 {
 	toc_t nt = {};
 	if (physical_disc_current_toc(&nt) || !nt.last) return;
+	physical_disc_psx_enrich_toc(&nt);
 	apply_disc_bias(&nt);
 	toc = nt;   
 
@@ -945,6 +949,7 @@ static void psx_swap_apply()
 	send_cue_and_metadata(&toc, 0, region, 0);
 	user_io_set_index(s_swap_fidx);
 	mount_cd(toc.end * CD_SECTOR_LEN, s_swap_sidx);
+	s_swap_eject_notified = 0;
 }
 
 
@@ -968,9 +973,20 @@ void psx_swap_disc()
 
 void psx_poll()
 {
-	
-	
-	if (toc.phys && physical_disc_swap_consume()) psx_swap_apply();
+	if (toc.phys)
+	{
+		if (physical_disc_swap_consume())
+		{
+			psx_swap_apply();
+		}
+		else if (physical_disc_swap_ejected() && !s_swap_eject_notified)
+		{
+			printf("PSX: physical disc ejected\n");
+			user_io_set_index(s_swap_fidx);
+			mount_cd(0, s_swap_sidx);
+			s_swap_eject_notified = 1;
+		}
+	}
 
 	spi_uio_cmd(UIO_CD_GET);
 }
