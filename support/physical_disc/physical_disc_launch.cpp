@@ -127,10 +127,10 @@ void physical_disc_launch_startup(void)
 {
 	physical_disc_acoustic_config(cfg.physical_disc_acoustic);
 	const char *name = user_io_get_core_name();
-	if (!name || strncasecmp(name, "CD-", 3)) return;
-	if (!strcasecmp(name, "CD-SNES") || !strcasecmp(name, "CD-MDPlus"))
+	if (!name || strncasecmp(name, "A0CD-", 5)) return;
+	if (!strcasecmp(name, "A0CD-SNES") || !strcasecmp(name, "A0CD-MDPlus"))
 	{
-		int suppress_startup_osd = !strcasecmp(name, "CD-MDPlus");
+		int suppress_startup_osd = !strcasecmp(name, "A0CD-MDPlus");
 		physical_disc_launch_cancel();
 		physical_disc_close();
 		mount_retry_at = 0;
@@ -156,7 +156,7 @@ void physical_disc_launch_startup(void)
 	{
 		if (physical_disc_mount_current_core())
 		{
-			if (!strcasecmp(name, "CD-NeoGeoCD")) suppress_neogeo_boot_osd_until = GetTimer(3000);
+			if (!strcasecmp(name, "A0CD-NeoGeoCD")) suppress_neogeo_boot_osd_until = GetTimer(3000);
 			mount_retry_at = 0;
 			mount_giveup_at = 0;
 			return;
@@ -224,7 +224,7 @@ void physical_disc_launch_poll(void)
 	else if (physical_disc_mount_current_core())
 	{
 		const char *name = user_io_get_core_name();
-		if (name && !strcasecmp(name, "CD-NeoGeoCD")) suppress_neogeo_boot_osd_until = GetTimer(3000);
+		if (name && !strcasecmp(name, "A0CD-NeoGeoCD")) suppress_neogeo_boot_osd_until = GetTimer(3000);
 		mount_retry_at = 0;
 		mount_giveup_at = 0;
 		return;
@@ -276,6 +276,21 @@ static void menu_write_handled(unsigned int value)
 	if (f) { fprintf(f, "%08x\n", value); fclose(f); }
 }
 
+static const char *menu_audio_mgl(void)
+{
+	const char *name = cfg.physical_disc_audio_cd;
+	if (!name || !*name || !strcasecmp(name, "PSX") || !strcasecmp(name, "A0CD-PSX")) return "PSX.mgl";
+	if (!strcasecmp(name, "PCE") || !strcasecmp(name, "A0CD-TurboGrafx16-CD")) return "TurboGrafx16-CD.mgl";
+	if (!strcasecmp(name, "A0CD-MDPlus")) return "MDPlus.mgl";
+	if (!strcasecmp(name, "A0CD-MegaCD")) return "MegaCD.mgl";
+	if (!strcasecmp(name, "A0CD-Saturn")) return "Saturn.mgl";
+	if (!strcasecmp(name, "A0CD-NeoGeoCD")) return "NeoGeoCD.mgl";
+	if (!strcasecmp(name, "A0CD-3DO")) return "3DO.mgl";
+	if (!strcasecmp(name, "A0CD-CDi")) return "CDi.mgl";
+	if (!strcasecmp(name, "A0CD-SNES")) return "SNES-MSU1.mgl";
+	return "PSX.mgl";
+}
+
 static const char *menu_mgl_for_disc(physical_disc_disc_t type)
 {
 	switch (type)
@@ -289,8 +304,7 @@ static const char *menu_mgl_for_disc(physical_disc_disc_t type)
 	case PHYSICAL_DISC_DISC_3DO: return "3DO.mgl";
 	case PHYSICAL_DISC_DISC_CDI: return "CDi.mgl";
 	case PHYSICAL_DISC_DISC_SNES: return "SNES-MSU1.mgl";
-	case PHYSICAL_DISC_DISC_AUDIO:
-		return !strcasecmp(cfg.physical_disc_audio_cd, "PCE") ? "TurboGrafx16-CD.mgl" : "PSX.mgl";
+	case PHYSICAL_DISC_DISC_AUDIO: return menu_audio_mgl();
 	default: return NULL;
 	}
 }
@@ -325,7 +339,7 @@ void physical_disc_launch_cancel(void)
 void physical_disc_launch_reset(void)
 {
 	const char *name = user_io_get_core_name();
-	if (!name || strncasecmp(name, "CD-", 3) || !strcasecmp(name, "CD-SNES") || !strcasecmp(name, "CD-MDPlus")) return;
+	if (!name || strncasecmp(name, "A0CD-", 5) || !strcasecmp(name, "A0CD-SNES") || !strcasecmp(name, "A0CD-MDPlus")) return;
 
 	physical_disc_launch_cancel();
 	physical_disc_close();

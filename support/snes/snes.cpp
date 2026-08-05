@@ -516,7 +516,7 @@ static const char cd_snes_mount_path[] = "/tmp/cd-snes";
 static int cd_snes_active(void)
 {
 	const char *name = user_io_get_core_name();
-	return name && !strcmp(name, "CD-SNES");
+	return name && !strcmp(name, "A0CD-SNES");
 }
 
 static int cd_snes_streaming_active(void)

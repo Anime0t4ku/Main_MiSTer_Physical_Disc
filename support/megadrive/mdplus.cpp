@@ -233,7 +233,7 @@ static const char cd_mdplus_mount_path[] = "/tmp/cd-mdplus";
 static int cd_mdplus_active()
 {
 	const char *name = user_io_get_core_name();
-	return name && !strcmp(name, "CD-MDPlus");
+	return name && !strcmp(name, "A0CD-MDPlus");
 }
 
 static int cd_mdplus_name_compare(const void *a, const void *b)
