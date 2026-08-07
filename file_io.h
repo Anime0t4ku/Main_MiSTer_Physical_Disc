@@ -56,26 +56,26 @@ direntext_t* flist_SelectedItem();
 char* flist_Path();
 char* flist_GetPrevNext(const char* base_path, const char* file, const char* ext, int next);
 
+// scanning flags
+#define SCANF_INIT       0 // start search from beginning of directory
+#define SCANF_NEXT       1 // find next file in directory
+#define SCANF_PREV      -1 // find previous file in directory
+#define SCANF_NEXT_PAGE  2 // find next 16 files in directory
+#define SCANF_PREV_PAGE -2 // find previous 16 files in directory
+#define SCANF_SET_ITEM   3 // find exact item
+#define SCANF_END        4 // find last file in directory
+#define SCANF_NEXT_CHAR  5 // find next letter/number
+#define SCANF_PREV_CHAR -5 // find previous letter/number
 
-#define SCANF_INIT       0 
-#define SCANF_NEXT       1 
-#define SCANF_PREV      -1 
-#define SCANF_NEXT_PAGE  2 
-#define SCANF_PREV_PAGE -2 
-#define SCANF_SET_ITEM   3 
-#define SCANF_END        4 
-#define SCANF_NEXT_CHAR  5 
-#define SCANF_PREV_CHAR -5 
-
-
-#define SCANO_DIR        0b000000001 
-#define SCANO_UMOUNT     0b000000010 
-#define SCANO_CORES      0b000000100 
+// options flags
+#define SCANO_DIR        0b000000001 // include subdirectories
+#define SCANO_UMOUNT     0b000000010 // allow backspace key
+#define SCANO_CORES      0b000000100 // only include subdirectories with prefix '_'
 #define SCANO_TXT        0b000001000
 #define SCANO_NEOGEO     0b000010000
 #define SCANO_NOENTER    0b000100000
 #define SCANO_NOZIP      0b001000000
-#define SCANO_CLEAR      0b010000000 
+#define SCANO_CLEAR      0b010000000 // allow backspace key, clear FC option
 #define SCANO_SAVES      0b100000000
 
 void FindStorage();
@@ -115,15 +115,15 @@ void FileGenerateSavestatePath(const char *name, char* out_name, int sufx);
 void FileGenerateScreenshotName(const char *name, char *out_name, const char *extension, int buflen);
 
 int FileSave(const char *name, void *pBuffer, int size);
-int FileLoad(const char *name, void *pBuffer, int size); 
+int FileLoad(const char *name, void *pBuffer, int size); // supply pBuffer = 0 to get the file size without loading
 int FileDelete(const char *name);
 int DirDelete(const char *name);
 
-
+//save/load from config dir
 #define CONFIG_DIR "config"
 const char* GetNameFromPath(char* path);
 int FileSaveConfig(const char *name, void *pBuffer, int size);
-int FileLoadConfig(const char *name, void *pBuffer, int size); 
+int FileLoadConfig(const char *name, void *pBuffer, int size); // supply pBuffer = 0 to get the file size without loading
 int FileDeleteConfig(const char *name);
 
 void AdjustDirectory(char *path);
@@ -139,7 +139,7 @@ struct gameAssetValidator
 	void *ctx;
 };
 
-
+// If validator is NULL, candidates are accepted with FileExists(path, 0).
 int findGameAsset(char *path,
 	size_t path_len,
 	const char *rom_path,
@@ -154,7 +154,7 @@ const char *getRootDir();
 const char *getFullPath(const char *name);
 
 uint32_t getFileType(const char *name);
-int isXmlName(const char *path); 
+int isXmlName(const char *path); // 1 - MRA, 2 - MGL
 
 bool FileOpenTextReader(fileTextReader *reader, const char *path);
 const char* FileReadLine(fileTextReader *reader);

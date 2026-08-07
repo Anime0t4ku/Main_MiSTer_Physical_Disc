@@ -2,6 +2,10 @@
 
 
 
+// bootcore.h
+// 2024, Aitor Gomez Garcia (info@aitorgomez.net)
+// Thanks to Sorgelig and BBond007 for their help and advice in the development of this feature.
+
 #ifndef __BOOTCORE_H__
 #define __BOOTCORE_H__
 
@@ -22,4 +26,4 @@ int find_core_rbf(const char *coreName, char *out, int outsz);
 extern char bootcoretype[64];
 extern int16_t btimeout;
 
-#endif 
+#endif // __BOOTCORE_H__

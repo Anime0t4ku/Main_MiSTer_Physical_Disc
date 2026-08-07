@@ -6,6 +6,8 @@
 
 
 
+// CDD command
+//#define P3DO_DEBUG				1
 #define P3DO_COMM_NOP				0x00
 #define P3DO_COMM_READ			    0x10
 #define P3DO_COMM_NEXT			    0x20
@@ -74,7 +76,7 @@ extern p3docdd_t p3docdd;
 extern uint32_t p3do_frame_cnt;
 
 
-#define SAVE_IO_INDEX		0x4 
+#define SAVE_IO_INDEX		0x4 // fake download to trigger save loading
 #define CD_DATA_IO_INDEX	0x8
 #define CD_INFO_IO_INDEX	0xC
 

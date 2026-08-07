@@ -72,7 +72,7 @@ int p3docdd_t::LoadCUE(const char* filename) {
 
 #ifdef P3DO_DEBUG
 	printf("\x1b[32m3DO: Open CUE: %s\n\x1b[0m", fname);
-#endif 
+#endif // P3DO_DEBUG
 
 	this->toc.last = -1;
 	int idx, mm, ss, bb, pregap = 0;
@@ -83,7 +83,7 @@ int p3docdd_t::LoadCUE(const char* filename) {
 		lptr = line;
 		while (*lptr == 0x20) lptr++;
 
-		
+		/* decode FILE commands */
 		if (!(memcmp(lptr, "FILE", 4)))
 		{
 			if (this->toc.last == 99) break;
@@ -114,7 +114,7 @@ int p3docdd_t::LoadCUE(const char* filename) {
 
 #ifdef P3DO_DEBUG
 			printf("\x1b[32m3DO: Open track file: %s\n\x1b[0m", fname);
-#endif 
+#endif // P3DO_DEBUG
 
 			pregap = 0;
 
@@ -125,24 +125,24 @@ int p3docdd_t::LoadCUE(const char* filename) {
 				FileClose(&this->toc.tracks[this->toc.last + 1].f);
 #ifdef P3DO_DEBUG
 				printf("\x1b[32m3DO: unsupported file: %s\n\x1b[0m", fname);
-#endif 
+#endif // P3DO_DEBUG
 
 				return -1;
 			}
 		}
 
-		
+		/* decode TRACK commands */
 		else if ((sscanf(lptr, "TRACK %02d %*s", &bb)) || (sscanf(lptr, "TRACK %d %*s", &bb)))
 		{
 			if (this->toc.last == 99) break;
 			this->toc.last++;
-			
+
 			if (bb != (this->toc.last + 1))
 			{
 				FileClose(&this->toc.tracks[this->toc.last].f);
 #ifdef P3DO_DEBUG
 				printf("\x1b[32m3DO: missing tracks: %s\n\x1b[0m", fname);
-#endif 
+#endif // P3DO_DEBUG
 				break;
 			}
 
@@ -156,38 +156,38 @@ int p3docdd_t::LoadCUE(const char* filename) {
 				this->sectorSize = 2352;
 				this->toc.tracks[this->toc.last].type = TT_MODE1;
 
-				
+				//FileSeek(&this->toc.tracks[0].f, 0x10, SEEK_SET);
 			}
 			else if (strstr(lptr, "MODE2/2352"))
 			{
 				this->sectorSize = 2352;
 				this->toc.tracks[this->toc.last].type = TT_MODE2;
 
-				
+				//FileSeek(&this->toc.tracks[0].f, 0x10, SEEK_SET);
 			}
 
 			if (!this->toc.last)
 			{
-				
+				/*if (strstr(lptr, "MODE1/2048"))
+				{
+					this->sectorSize = 2048;
+					this->toc.tracks[0].type = 1;
+				}
+				else if (strstr(lptr, "MODE1/2352") || strstr(lptr, "MODE2/2352"))
+				{
+					this->sectorSize = 2352;
+					this->toc.tracks[0].type = 1;
 
+					FileSeek(&this->toc.tracks[0].f, 0x10, SEEK_SET);
+				}
 
+				if (this->sectorSize)
+				{
+					this->toc.tracks[0].type = 1;
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+					FileReadAdv(&this->toc.tracks[0].f, header, 0x210);
+					FileSeek(&this->toc.tracks[0].f, 0, SEEK_SET);
+				}*/
 			}
 			else
 			{
@@ -206,17 +206,17 @@ int p3docdd_t::LoadCUE(const char* filename) {
 
 #ifdef P3DO_DEBUG
 			printf("\x1b[32m3DO: track = %u, type = %u\n\x1b[0m", this->toc.last + 1, (int)this->toc.tracks[this->toc.last].type);
-#endif 
+#endif // P3DO_DEBUG
 		}
 
-		
+		/* decode PREGAP commands */
 		else if (sscanf(lptr, "PREGAP %02d:%02d:%02d", &mm, &ss, &bb) == 3)
 		{
 			this->toc.tracks[this->toc.last].pregap = bb + ss * 75 + mm * 60 * 75;
 			pregap += this->toc.tracks[this->toc.last].pregap;
 		}
 
-		
+		/* decode INDEX commands */
 		else if ((sscanf(lptr, "INDEX %02d %02d:%02d:%02d", &idx, &mm, &ss, &bb) == 4) ||
 			(sscanf(lptr, "INDEX %01d %02d:%02d:%02d", &idx, &mm, &ss, &bb) == 4))
 		{
@@ -238,7 +238,7 @@ int p3docdd_t::LoadCUE(const char* filename) {
 						this->toc.tracks[this->toc.last - 1].end = this->toc.tracks[this->toc.last].start - this->toc.tracks[this->toc.last].pregap;
 #ifdef P3DO_DEBUG
 						printf("\x1b[32m3DO: track = %u, start = %u, end = %u\n\x1b[0m", this->toc.last - 1 + 1, this->toc.tracks[this->toc.last - 1].start, this->toc.tracks[this->toc.last - 1].end);
-#endif 
+#endif // P3DO_DEBUG
 					}
 				}
 				else
@@ -253,12 +253,12 @@ int p3docdd_t::LoadCUE(const char* filename) {
 					this->toc.end = this->toc.tracks[this->toc.last].end;
 #ifdef P3DO_DEBUG
 					printf("\x1b[32m3DO: track = %u, start = %u, end = %u\n\x1b[0m", this->toc.last + 1, this->toc.tracks[this->toc.last].start, this->toc.tracks[this->toc.last].end);
-#endif 
+#endif // P3DO_DEBUG
 				}
 
 #ifdef P3DO_DEBUG
 				printf("\x1b[32m3DO: track = %u, offset = %u\n\x1b[0m", this->toc.last + 1, this->toc.tracks[this->toc.last].offset);
-#endif 
+#endif // P3DO_DEBUG
 			}
 
 			if (idx == 0) {
@@ -276,8 +276,8 @@ int p3docdd_t::LoadCUE(const char* filename) {
 			}
 			this->toc.tracks[this->toc.last].index_num = idx + 1;
 #ifdef P3DO_DEBUG
-			
-#endif 
+			//printf("\x1b[32mSaturn: index = %u, pos = %u\n\x1b[0m", idx, this->toc.tracks[this->toc.last].indexes[idx]);
+#endif // P3DO_DEBUG
 		}
 	}
 	this->toc.last++;
@@ -308,7 +308,7 @@ int p3docdd_t::LoadISO(const char* filename) {
 
 #ifdef P3DO_DEBUG
 	printf("\x1b[32m3DO: track = %u, start = %u, end = %u\n\x1b[0m", this->toc.last, this->toc.tracks[this->toc.last - 1].start, this->toc.tracks[this->toc.last - 1].end);
-#endif 
+#endif // P3DO_DEBUG
 
 	return 0;
 }
@@ -329,7 +329,7 @@ int p3docdd_t::Load(const char *filename)
 				return (-1);
 			}
 		}
-		
+
 		this->sectorSize = 2352;
 	}
 	else if (!strncasecmp(".cue", ext, 4))
@@ -372,20 +372,20 @@ int p3docdd_t::Load(const char *filename)
 		return (-1);
 	}
 
-	
+	/*if (this->toc.chd_f)
+	{
+		mister_chd_read_sector(this->toc.chd_f, 0, 0, 0, 0x10, (uint8_t *)header, this->chd_hunkbuf, &this->chd_hunknum);
+	}
+	else {
+		fd_img = &this->toc.tracks[0].f;
 
-
-
-
-
-
-
-
-
+		FileSeek(fd_img, 0, SEEK_SET);
+		FileReadAdv(fd_img, header, 0x10);
+	}*/
 
 #ifdef P3DO_DEBUG
 	printf("\x1b[32m3DO: Sector size = %u, Track 1 end = %u\n\x1b[0m", this->sectorSize, this->toc.tracks[0].end);
-#endif 
+#endif // P3DO_DEBUG
 
 	if (this->toc.last)
 	{
@@ -396,7 +396,7 @@ int p3docdd_t::Load(const char *filename)
 
 #ifdef P3DO_DEBUG
 		printf("\x1b[32m3DO: CD mounted, last track = %u\n\x1b[0m", this->toc.last);
-#endif 
+#endif // P3DO_DEBUG
 
 		return 1;
 	}
@@ -442,24 +442,24 @@ void p3docdd_t::Unload()
 	printf("\x1b[32m3DO: ");
 	printf("Unload");
 	printf("\n\x1b[0m");
-#endif 
+#endif // P3DO_DEBUG
 }
 
 int p3docdd_t::GetDiscInfo(uint8_t *buf) {
 	if (this->toc.last < 0) return -1;
-	
+
 	memset(buf, 0x00, 2048);
 
 	msf_t msf = { 0,2,0 };
 	LBAToMSF(this->toc.end + 150, &msf);
 
-	buf[1] = P3DO_DISC_DA_OR_CDROM;	
-	buf[2] = 0x01;	
-	buf[3] = this->toc.last;	
-	buf[4] = msf.m;	
-	buf[5] = msf.s;	
-	buf[6] = msf.f;	
-	
+	buf[1] = P3DO_DISC_DA_OR_CDROM; //disc id
+	buf[2] = 0x01; //first track
+	buf[3] = this->toc.last; //last track
+	buf[4] = msf.m; //mm
+	buf[5] = msf.s; //ss
+	buf[6] = msf.f; //ff
+
 	for (int i = 0, offs = 0x10; i <= this->toc.last; i++, offs+=0x10)
 	{
 		LBAToMSF(this->toc.tracks[i].start + 150, &msf);
@@ -468,9 +468,9 @@ int p3docdd_t::GetDiscInfo(uint8_t *buf) {
 		buf[offs + 2] = this->toc.tracks[i].type == TT_CDDA ? 0x00 : 0x04;
 		buf[offs + 3] = i + 1;
 		buf[offs + 4] = 0;
-		buf[offs + 5] = msf.m;    
-		buf[offs + 6] = msf.s;    
-		buf[offs + 7] = msf.f;    
+		buf[offs + 5] = msf.m; //min
+		buf[offs + 6] = msf.s; //sec
+		buf[offs + 7] = msf.f; //frames
 		buf[offs + 8] = 0;
 	}
 
@@ -496,7 +496,7 @@ void p3docdd_t::Reset() {
 	printf("\x1b[32m3DO: ");
 	printf("Reset");
 	printf("\n\x1b[0m");
-#endif 
+#endif // P3DO_DEBUG
 }
 
 void p3docdd_t::CommandExec() {
@@ -506,16 +506,16 @@ void p3docdd_t::CommandExec() {
 	switch (comm[0]) {
 	case P3DO_COMM_NOP:
 #ifdef P3DO_DEBUG
-		
-		
-		
-#endif 
+		//printf("\x1b[32m3DO: ");
+		//printf("Command Nop");
+		//printf(" (%u)\n\x1b[0m", p3do_frame_cnt);
+#endif // P3DO_DEBUG
 		break;
 
 	case P3DO_COMM_READ:
 		this->lba = cmd_lba - 150;
 
-		
+
 		if (this->toc.phys) physical_disc_seek_hint(this->lba);
 
 		this->track = this->toc.GetTrackByLBA(this->lba);
@@ -526,23 +526,23 @@ void p3docdd_t::CommandExec() {
 		this->speed = comm[7] == 1 ? 1 : 2;
 
 #ifdef P3DO_DEBUG
-		
-		
-		
+		//printf("\x1b[32m3DO: ");
+		//printf("Command = %02X %02X %02X %02X %02X %02X %02X %02X", comm[0], comm[1], comm[2], comm[3], comm[4], comm[5], comm[6], comm[7]);
+		//printf("\n\x1b[0m");
 		printf("\x1b[32m3DO: ");
 		printf("Command Read Data: cmd_lba = %u, cmd_blocks = %u, track = %u, track_start = %u, speed = %u", cmd_lba, cmd_blocks, this->track + 1, this->toc.tracks[this->track].start, this->speed);
 		printf(" (%u)\n\x1b[0m", p3do_frame_cnt);
-#endif 
+#endif // P3DO_DEBUG
 		break;
 
 	case P3DO_COMM_NEXT:
 		if (this->block_reads > 0) this->read_pend = true;
 
 #ifdef P3DO_DEBUG
-		
-		
-		
-#endif 
+		//printf("\x1b[32m3DO: ");
+		//printf("Command Next Data");
+		//printf(" (%u)\n\x1b[0m", p3do_frame_cnt);
+#endif // P3DO_DEBUG
 		break;
 
 	default:
@@ -552,7 +552,7 @@ void p3docdd_t::CommandExec() {
 		printf("\x1b[32m3DO: ");
 		printf("Command undefined, command = %02X %02X %02X %02X %02X %02X %02X %02X", comm[0], comm[1], comm[2], comm[3], comm[4], comm[5], comm[6], comm[7]);
 		printf(" (%u)\n\x1b[0m", p3do_frame_cnt);
-#endif 
+#endif // P3DO_DEBUG
 		break;
 	}
 }
@@ -567,7 +567,7 @@ void p3docdd_t::Process(uint8_t* time_mode) {
 		printf("\x1b[32m3DO: ");
 		printf("Lid open");
 		printf(" (%u)\n\x1b[0m", p3do_frame_cnt);
-#endif 
+#endif // P3DO_DEBUG
 	}
 	else if (this->read_pend) {
 		this->state = P3DO_Read;
@@ -577,10 +577,10 @@ void p3docdd_t::Process(uint8_t* time_mode) {
 		 this->read_pend = false;
 
 #ifdef P3DO_DEBUG
-		
-		
-		
-#endif 
+		//printf("\x1b[32m3DO: ");
+		//printf("Process read data, track = %i, lba = %i, amsf = %02X:%02X:%02X, msf = %02X:%02X:%02X", this->track + 1, this->lba, BCD(amsf.m), BCD(amsf.s), BCD(amsf.f), BCD(msf.m), BCD(msf.s), BCD(msf.f));
+		//printf(" (%u)\n\x1b[0m", p3do_frame_cnt);
+#endif // P3DO_DEBUG
 	}
 	else {
 		this->state = P3DO_Idle;
@@ -606,14 +606,14 @@ void p3docdd_t::Update() {
 
 		if (this->toc.tracks[this->track].type == TT_MODE1)
 		{
-			
+			// CD-ROM Data (Mode 1/2)
 			uint8_t header[16];
 
 #ifdef P3DO_DEBUG
-			
-			
-			
-#endif 
+			//printf("\x1b[32m3DO: ");
+			//printf("Update read data, track = %i, lba = %i, msf = %02X:%02X:%02X, mode = %u", this->track + 1, this->lba + 150, BCD(msf.m), BCD(msf.s), BCD(msf.f), this->toc.tracks[this->track].type);
+			//printf("\n\x1b[0m");
+#endif // P3DO_DEBUG
 
 			if (this->sectorSize == 2048 || (this->lba - this->toc.tracks[this->track].start) < 0) {
 				header[0] = 0x00;
@@ -631,20 +631,20 @@ void p3docdd_t::Update() {
 		}
 		else
 		{
-			
+			//AudioSectorSend(this->audioFirst);
 		}
 
 #ifdef P3DO_DEBUG
-		
-		
-		
-#endif 
+		//printf("\x1b[32m3DO: ");
+		//printf("Update read data, lba = %i, blocks = %i msf = %u:%u:%u", this->lba, this->block_reads, msf.m, msf.s, msf.f);
+		//printf(" (%u)\n\x1b[0m", p3do_frame_cnt);
+#endif // P3DO_DEBUG
 
 		this->lba++;
 		this->track = this->toc.GetTrackByLBA(this->lba);
 		this->block_reads--;
 		this->block_count++;
-		
+		//if (this->block_count == 16 || this->block_reads == 0) this->read_pend = false;
 		break;
 
 	case P3DO_Pause:
@@ -698,13 +698,13 @@ int p3docdd_t::SetCommand(uint8_t* data) {
 void p3docdd_t::ReadData(uint8_t *buf)
 {
 	int offs = 0; 
-	
+
 	if (this->toc.tracks[this->track].type == TT_MODE1)
 	{
 		int lba_ = this->lba >= 0 ? this->lba : 0;
 		if (this->toc.phys)
 		{
-			
+
 
 			physical_disc_read_sector(lba_, buf, NULL);
 		}
@@ -731,10 +731,10 @@ void p3docdd_t::ReadData(uint8_t *buf)
 				FileReadAdv(&this->toc.tracks[this->track].f, buf, 2352);
 			}
 #ifdef P3DO_DEBUG
-			
-			
-			
-#endif 
+			//printf("\x1b[32m3DO: ");
+			//printf("Read data, lba = %i, track = %i, offset = %i", lba_, this->track, offs);
+			//printf(" (%u)\n\x1b[0m", p3do_frame_cnt);
+#endif // P3DO_DEBUG
 		}
 	}
 }

@@ -60,20 +60,20 @@ static uint64_t buffer_lba[16] = { ULLONG_MAX,ULLONG_MAX,ULLONG_MAX,ULLONG_MAX,
 
 static int use_save = 0;
 
-
+// mouse and keyboard emulation state
 static int emu_mode = EMU_NONE;
 
-
+// keep state over core type and its capabilities
 static unsigned char core_type = CORE_TYPE_UNKNOWN;
 static unsigned char dual_sdr = 0;
 
 static int fio_size = 0;
 static int io_ver = 0;
 
-
+// keep state of caps lock
 static char caps_lock_toggle = 0;
 
-#define LED_FREQ 100   
+#define LED_FREQ 100 // 100 ms
 static unsigned long led_timer;
 static char keyboard_leds = 0;
 static bool caps_status = 0;
@@ -127,8 +127,8 @@ uint32_t user_io_get_uart_mode()
 	return uart_mode;
 }
 
-
-
+// set by OSD code to suppress forwarding of those keys to the core which
+// may be in use by an active OSD
 static char osd_is_visible = 0;
 
 char user_io_osd_is_visible()
@@ -449,7 +449,7 @@ void user_io_read_core_name()
 	char *p = user_io_get_confstr(0);
 	if (p && p[0]) snprintf(orig_name, sizeof(orig_name), "%s", p);
 
-	
+	// get core name
 	if (ovr_name[0]) strcpy(core_name, ovr_name);
 	else if (orig_name[0]) strcpy(core_name, p);
 
@@ -519,7 +519,7 @@ int user_io_status_bits(const char *opt, int *s, int *e, int ex, int single)
 		if (start > 127 || end > 127 || (!single && end <= start)) return 0;
 	}
 
-	
+	//max 8 bits per option
 	if (end - start > 8) return 0;
 
 	if (s) *s = (int)start;
@@ -650,10 +650,10 @@ int user_io_get_kbdemu()
 
 static int joy_force = 0;
 
-
-
-
-
+// Analog/Digital Joystick translation
+// 0 - translate Analog to Digital (default)
+// 1 - translate Digital to Analog
+// 2 - do not translate
 static int joy_transl = 0;
 
 int user_io_get_joy_transl()
@@ -815,7 +815,7 @@ static void parse_config()
 			}
 			else
 			{
-				
+				//skip Disable/Hide masks
 				while ((p[0] == 'H' || p[0] == 'D' || p[0] == 'h' || p[0] == 'd') && strlen(p) >= 2) p += 2;
 			}
 			if (p[0] == 'P') p += 2;
@@ -885,7 +885,7 @@ static void parse_config()
 
 			if (p[0] == 'V')
 			{
-				
+				// get version string
 				char s[128];
 				strcpy(s, OsdCoreNameGet());
 				strcat(s, " ");
@@ -990,7 +990,7 @@ static void parse_config()
 		i++;
 	} while (p || i<3);
 
-	mask[0] = 1; 
+	mask[0] = 1; // reset is always on bit 0
 	printf("\n// Status Bit Map:\n");
 	printf("//              Upper                          Lower\n");
 	printf("// 0         1         2         3          4         5         6   \n");
@@ -1050,7 +1050,7 @@ static void parse_config()
 	}
 
 
-	
+	// legacy GBA versions
 	if (is_gba() && !ss_base)
 	{
 		ss_base = 0x3E000000;
@@ -1058,10 +1058,10 @@ static void parse_config()
 	}
 }
 
-
+//MSM6242B layout
 static void send_rtc(int type)
 {
-	
+	//printf("Update RTC\n");
 
 	time_t t = time(NULL);
 
@@ -1386,12 +1386,15 @@ void user_io_init(const char *path, const char *xml)
 	core_name[0] = 0;
 	disable_osd = 0;
 
-	
+	// Clean up old game ID when loading a new core
 	unlink("/tmp/GAMEID");
 
-	
-	
-	
+
+
+
+	// we need to set the directory to where the XML file (MRA) is
+	// not the RBF. The RBF will be in arcade, which the user shouldn't
+	// browse
 	strcpy(core_path, xml ? xml : path);
 	strcpy(rbf_path, path);
 
@@ -1429,7 +1432,7 @@ void user_io_init(const char *path, const char *xml)
 		printf("Identified 8BIT core");
 		spi_uio_cmd16(UIO_SET_MEMSZ, sdram_sz(-1));
 
-		
+		// send a reset
 		user_io_status_set("[0]", 1);
 	}
 	else if (core_type == CORE_TYPE_SHARPMZ)
@@ -1471,8 +1474,8 @@ void user_io_init(const char *path, const char *xml)
 	parse_config();
 	if (!xml && defmra[0] && FileExists(defmra))
 	{
-		
-		
+		// attn: FC option won't use name from defmra!
+		// attn: cfg is parsed before defmra, no defmra-name specifics possible in INI!
 		xml = (const char*)defmra;
 		strcpy(core_path, xml);
 		is_arcade_type = 1;
@@ -1509,7 +1512,7 @@ void user_io_init(const char *path, const char *xml)
 		break;
 
 	case CORE_TYPE_8BIT:
-		
+		// try to load config
 		name = user_io_create_config_name(1);
 		if (strlen(name) > 0)
 		{
@@ -1583,7 +1586,7 @@ void user_io_init(const char *path, const char *xml)
 					{
 						if (!is_cpc())
 						{
-							
+							// check for multipart rom
 							for (char i = (boot0_loaded ? 1 : 0); i < 4; i++)
 							{
 								sprintf(mainpath, "%s/boot%d.rom", home, i);
@@ -1591,7 +1594,7 @@ void user_io_init(const char *path, const char *xml)
 							}
 						}
 
-						
+						// legacy style of rom
 						if (!boot0_loaded)
 						{
 							sprintf(mainpath, "%s/boot.rom", home);
@@ -1610,7 +1613,7 @@ void user_io_init(const char *path, const char *xml)
 							}
 						}
 
-						
+						// cheats & game docs for boot file
 						game_docs_init("", user_io_get_file_crc());
 						if (user_io_use_cheats()) cheats_init("", user_io_get_file_crc());
 					}
@@ -1632,7 +1635,7 @@ void user_io_init(const char *path, const char *xml)
 						}
 					}
 
-					
+					// check if vhd present
 					for (char i = (boot0_mounted ? 1 : 0); i < 4; i++)
 					{
 						sprintf(mainpath, "%s/boot%d.vhd", home, i);
@@ -1675,7 +1678,7 @@ void user_io_init(const char *path, const char *xml)
 
 		send_rtc(3);
 
-		
+		// release reset
 		if (!is_minimig() && !is_st()) user_io_status_set("[0]", 0);
 		if (xml && isXmlName(xml) == 1) arcade_check_error();
 
@@ -1809,29 +1812,29 @@ void user_io_digital_joystick(unsigned char joystick, uint32_t map, int newdir)
 static uint8_t CSD[16] = { 0xf1, 0x40, 0x40, 0x0a, 0x80, 0x7f, 0xe5, 0xe9, 0x00, 0x00, 0x59, 0x5b, 0x32, 0x00, 0x0e, 0x40 };
 static uint8_t CID[16] = { 0x3e, 0x00, 0x00, 0x34, 0x38, 0x32, 0x44, 0x00, 0x00, 0x73, 0x2f, 0x6f, 0x93, 0x00, 0xc7, 0xcd };
 
-
+// set SD card info in FPGA (CSD, CID)
 void user_io_sd_set_config(void)
 {
 	CSD[6] = (uint8_t)(sd_image[0].size >> 9);
 	CSD[7] = (uint8_t)(sd_image[0].size >> 17);
 	CSD[8] = (uint8_t)(sd_image[0].size >> 25);
 
-	
+	// forward it to the FPGA
 	spi_uio_cmd_cont(UIO_SET_SDCONF);
 	spi_write(CID, sizeof(CID), fio_size);
 	spi_write(CSD, sizeof(CSD), fio_size);
-	spi8(1); 
+	spi8(1); //SDHC permanently
 
 	DisableIO();
-
-
-
-
-
-
+/*
+	printf("SD CID\n");
+	hexdump(CID, sizeof(CID), 0);
+	printf("SD CSD\n");
+	hexdump(CSD, sizeof(CSD), 0);
+*/
 }
 
-
+// read 8 bit keyboard LEDs status from FPGA
 uint16_t user_io_kbdled_get_status(void)
 {
 	uint16_t c;
@@ -1862,8 +1865,8 @@ uint8_t user_io_ps2_ctl(uint8_t *kbd_ctl, uint8_t *mouse_ctl)
 	return res;
 }
 
-
-#define KBD_FIFO_SIZE  16   
+// 16 byte fifo for amiga key codes to limit max key rate sent into the core
+#define KBD_FIFO_SIZE  16 // must be power of 2
 static unsigned short kbd_fifo[KBD_FIFO_SIZE];
 static unsigned char kbd_fifo_r = 0, kbd_fifo_w = 0;
 static long kbd_timer = 0;
@@ -1871,28 +1874,28 @@ static long kbd_timer = 0;
 static void kbd_fifo_minimig_send(uint32_t code)
 {
 	spi_uio_cmd8((code&OSD) ? UIO_KBD_OSD : UIO_KEYBOARD, code & 0xff);
-	kbd_timer = GetTimer(10);  
+	kbd_timer = GetTimer(10); // next key after 10ms earliest
 }
 
 static void kbd_fifo_enqueue(unsigned short code)
 {
-	
+	// if fifo full just drop the value. This should never happen
 	if (((kbd_fifo_w + 1)&(KBD_FIFO_SIZE - 1)) == kbd_fifo_r)
 		return;
 
-	
+	// store in queue
 	kbd_fifo[kbd_fifo_w] = code;
 	kbd_fifo_w = (kbd_fifo_w + 1)&(KBD_FIFO_SIZE - 1);
 }
 
-
+// send pending bytes if timer has run up
 static void kbd_fifo_poll()
 {
-	
+	// timer enabled and runnig?
 	if (kbd_timer && !CheckTimer(kbd_timer))
 		return;
 
-	kbd_timer = 0;  
+	kbd_timer = 0; // timer == 0 means timer is not running anymore
 
 	if (kbd_fifo_w == kbd_fifo_r)
 		return;
@@ -2086,7 +2089,7 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 	int writable = 0;
 	int ret = 0;
 	int len = strlen(name);
-	int img_type = 0; 
+	int img_type = 0; // disk image type (for C128 core): bit 0=dual sided, 1=raw GCR supported, 2=raw MFM supported, 3=high density
 
 	sd_image_cangrow[index] = (pre != 0);
 	sd_type[index] = SD_TYPE_DEFAULT ;
@@ -2154,7 +2157,7 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 					}
 				}
 
-				
+				// Apple IIgs: classify/validate/convert the image for its slot.
 				if (ret && iigs_is_core())
 				{
 					int iigs_w = writable;
@@ -2214,7 +2217,7 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 
 	user_io_sd_set_config();
 
-	
+	// send mounted image size first then notify about mounting
 	EnableIO();
 	spi8(UIO_SET_SDINFO);
 
@@ -2238,7 +2241,7 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 	}
 	DisableIO();
 
-	
+	// notify core of possible sd image change
 	spi_uio_cmd8(UIO_SET_SDSTAT, (1 << index) | (writable ? 0 : 0x80));
 	return ret ? 1 : 0;
 }
@@ -2512,7 +2515,7 @@ static void send_pcolchr(const char* name, unsigned char index, int type)
 	{
 		printf("Send additional file %s\n", full_path);
 
-		
+		//hexdump(col_attr, sizeof(col_attr));
 
 		user_io_set_index(index);
 
@@ -2532,12 +2535,12 @@ void user_io_write_gameid(const char *filename, uint32_t crc32_val, const char *
 {
 	if (!cfg.log_file_entry) return;
 
-	
+	// Extract basename from filename
 	const char *fname = strrchr(filename, '/');
 	if (!fname) fname = filename;
 	else fname++;
 
-	
+	// Skip BIOS files
 	if (strncasecmp(fname, "boot", 4) == 0 || strcasestr(fname, "bios"))
 	{
 		return;
@@ -2566,7 +2569,7 @@ void user_io_write_gameid(const char *filename, uint32_t crc32_val, const char *
 		wrote_something = 1;
 	}
 
-	
+	// Ensure we always write something to the file
 	if (!wrote_something)
 	{
 		fprintf(f, "# No game ID available\n");
@@ -2633,13 +2636,13 @@ int user_io_file_tx_a(const char* name, uint16_t index)
 
 	unsigned long bytes2send = f.size;
 
-	
+	/* transmit the entire file using one transfer */
 	printf("Addon file %s with %lu bytes to send for index %04X\n", name, bytes2send, index);
 
-	
+	// set index byte (0=bios rom, 1-n=OSD entry index)
 	user_io_set_aindex(index);
 
-	
+	// prepare transmission of new file
 	user_io_set_download(1);
 
 	int use_progress = 1;
@@ -2656,13 +2659,13 @@ int user_io_file_tx_a(const char* name, uint16_t index)
 		bytes2send -= chunk;
 	}
 
-	
+	// check if core requests some change while downloading
 	check_status_change();
 
 	printf("Done.\n");
 	FileClose(&f);
 
-	
+	// signal end of transmission
 	user_io_set_download(0);
 	ProgressMessage(0, 0, 0, 0);
 	return 1;
@@ -2688,22 +2691,22 @@ int user_io_file_tx(const char* name, unsigned char index, char opensave, char m
 		FileSeek(&f, off, SEEK_SET);
 	}
 
-	
+	/* transmit the entire file using one transfer */
 	printf("Selected file %s with %u bytes to send for index %d.%d\n", name, bytes2send, index & 0x3F, index >> 6);
 	if(load_addr) printf("Load to address 0x%X\n", load_addr);
 
-	
+	// set index byte (0=bios rom, 1-n=OSD entry index)
 	user_io_set_index(index);
 
 	int len = strlen(f.name);
 	char *p = strrchr(f.name, '.');
 	if (p == 0) {
-            
+            // In case a '.' is not found, send all `NUL` characters.
 	    p = f.name + len;
 	}
 	user_io_file_info(p);
 
-	
+	// prepare transmission of new file
 	user_io_set_download(1, load_addr ? bytes2send : 0);
 
 	int dosend = 1;
@@ -2739,7 +2742,7 @@ int user_io_file_tx(const char* name, unsigned char index, char opensave, char m
 				hexdump(buf, 16, 0);
 				user_io_file_tx_data(buf, 512);
 
-				
+				//strip original SNES ROM header if present (not used)
 				if ((bytes2send % 1024) == 512)
 				{
 					bytes2send -= 512;
@@ -2803,9 +2806,9 @@ int user_io_file_tx(const char* name, unsigned char index, char opensave, char m
 		}
 	}
 
-	uint32_t skip = bytes2send & 0x3FF; 
+	uint32_t skip = bytes2send & 0x3FF; // skip possible header up to 1023 bytes
 
-	int use_progress = 1; 
+	int use_progress = 1; // (bytes2send > (1024 * 1024)) ? 1 : 0;
 	int size = bytes2send;
 	if (use_progress) ProgressMessage(0, 0, 0, 0);
 
@@ -2891,7 +2894,7 @@ int user_io_file_tx(const char* name, unsigned char index, char opensave, char m
 		}
 	}
 
-	
+	// check if core requests some change while downloading
 	check_status_change();
 
 	printf("Done.\n");
@@ -2907,7 +2910,7 @@ int user_io_file_tx(const char* name, unsigned char index, char opensave, char m
 		user_io_file_mount((char*)buf, 0, 1);
 	}
 
-	
+	// signal end of transmission
 	user_io_set_download(0);
 	printf("\n");
 
@@ -2921,11 +2924,11 @@ int user_io_file_tx(const char* name, unsigned char index, char opensave, char m
 
 	if ((is_snes() || is_sgb()) && !load_addr)
 	{
-		
+		// Setup MSU
 		snes_msu_init(name);
 	}
 
-	mdplus_init(name); 
+	mdplus_init(name); // MD+ CDDA init
 
 	return 1;
 }
@@ -2950,7 +2953,7 @@ void user_io_read_confstr()
 char *user_io_get_confstr(int index)
 {
 	int lidx = 0;
-	static char buffer[(1024*2) + 1];  
+	static char buffer[(1024*2) + 1]; // max bytes per config item
 
 	char *start = cfgstr;
 	while (lidx < index)
@@ -3033,7 +3036,7 @@ void user_io_send_buttons(char force)
 			fpga_load_rbf(name);
 		}
 
-		
+		//special reset for some cores
 		if (!user_io_osd_is_visible() && (key_map & BUTTON2) && !(map & BUTTON2))
 		{
 			if (is_minimig()) minimig_reset();
@@ -3123,27 +3126,27 @@ void user_io_poll()
 		PROFILE_FUNCTION();
 	#endif
 
-	
-	
-	
+	// every frame, check if a screenshot has been requested.
+	// this is reduce risk of screenshot occurring while the scaler
+	// is being updated and getting a corrupted image.
 	add_frame_callback(screenshot_cb);
 
 	if ((core_type != CORE_TYPE_SHARPMZ) &&
 		(core_type != CORE_TYPE_8BIT))
 	{
-		return;  
+		return; // no user io for the installed core
 	}
 
 	user_io_send_buttons(0);
 
 	if (is_minimig())
 	{
-		
+		//HDD & FDD query
 		unsigned char  c1, c2;
 		EnableFpga();
 		uint16_t tmp = spi_w(0);
-		c1 = (uint8_t)(tmp >> 8); 
-		c2 = (uint8_t)tmp;      
+		c1 = (uint8_t)(tmp >> 8); // cmd request and drive number
+		c2 = (uint8_t)tmp; // track number
 		spi_w(0);
 		spi_w(0);
 		DisableFpga();
@@ -3161,7 +3164,7 @@ void user_io_poll()
 
 		if (!rtc_timer || CheckTimer(rtc_timer))
 		{
-			
+			// Update once per minute should be enough
 			rtc_timer = GetTimer(60000);
 			send_rtc(1);
 		}
@@ -3174,7 +3177,7 @@ void user_io_poll()
 		check_status_change();
 	}
 
-	
+
 	snes_cd_session_poll();
 	mdplus_cd_session_poll();
 
@@ -3186,7 +3189,7 @@ void user_io_poll()
 	{
 		if (is_st()) tos_poll();
 		if (is_snes() || is_sgb()) snes_poll();
-		mdplus_poll(); 
+		mdplus_poll(); // MD+ CDDA poll
 
 		for (int i = 0; i < 4; i++)
 		{
@@ -3227,7 +3230,7 @@ void user_io_poll()
 					sz = blksz * blks;
 				}
 
-				
+				//if (op) printf("c=%X, op=%d, blkpow=%d, sz=%d, lba=%llu, disk=%d\n", c, op, blkpow, sz, lba, disk);
 			}
 			else
 			{
@@ -3237,7 +3240,7 @@ void user_io_poll()
 					lba = spi_w(0);
 					lba = (lba & 0xFFFF) | (((uint32_t)spi_w(0)) << 16);
 
-					
+					// check if core requests configuration
 					if ((c & 0xC) == 0xC)
 					{
 						printf("core requests SD config\n");
@@ -3275,7 +3278,7 @@ void user_io_poll()
 			DisableIO();
 			if ( sd_type[disk] == SD_TYPE_A2)
 			{
-				
+				//if (op) printf("A2 %x %llu on %d\n", op,lba, disk);
 				if (op == 2) a2_writeDSK(&sd_image[disk], lba, ack);
 				else if (op & 1) a2_readDSK(&sd_image[disk], lba, ack);
 				else break;
@@ -3294,19 +3297,19 @@ void user_io_poll()
 			}
 			else if (is_n64() && n64_process_save(use_save, op, lba, blksz, ack, buffer_lba[disk], buffer[disk], sizeof(*buffer), sz))
 			{
-				
-				
-				
+				// Handled by N64 core logic.
+				// If n64_process_save returns false (e.g. use_save is off, or unsupported op),
+				// it will fall through to the generic handler below.
 			}
 			else if (op == 2)
 			{
-				
+				//printf("SD WR %llu on %d\n", lba, disk);
 
 				if (use_save) menu_process_save();
 
 				buffer_lba[disk] = -1;
 
-				
+				// Fetch sector data from FPGA ...
 				EnableIO();
 				spi_w(UIO_SECTOR_WR | ack);
 				spi_block_read(buffer[disk], fio_size, sz);
@@ -3314,7 +3317,7 @@ void user_io_poll()
 
 				if (sd_image[disk].type == 2 && !lba)
 				{
-					
+					//Create the file
 					if (FileOpenEx(&sd_image[disk], sd_image[disk].path, O_CREAT | O_RDWR | O_SYNC))
 					{
 						diskled_on();
@@ -3330,7 +3333,7 @@ void user_io_poll()
 				}
 				else
 				{
-					
+					// ... and write it to disk
 					uint64_t size = sd_image[disk].size / blksz;
 					if (sz && lba <= size)
 					{
@@ -3353,17 +3356,17 @@ void user_io_poll()
 				uint32_t buf_n = sizeof(buffer[0]) / blksz;
 				if (is_psx() && blksz == 2352)
 				{
-					
+					//returns 0 if the mounted disk is not a chd, otherwise returns the chd hunksize in bytes
 					unsigned int psx_blksz = psx_chd_hunksize();
 					if (psx_blksz && psx_blksz <= sizeof(buffer[0])) buf_n = psx_blksz / blksz;
 				}
 				else if (is_cdi() && blksz == CDI_CDIC_BUFFER_SIZE)
 				{
-					
+					//returns 0 if the mounted disk is not a chd, otherwise returns the chd hunksize in bytes
 					unsigned int cdi_blksz = cdi_chd_hunksize();
 					if (cdi_blksz && cdi_blksz <= sizeof(buffer[0])) buf_n = cdi_blksz / blksz;
 				}
-				
+				//printf("SD RD (%llu,%d) on %d, WIDE=%d\n", lba, blksz, disk, fio_size);
 
 				int done = 0;
 				uint32_t offset;
@@ -3398,8 +3401,8 @@ void user_io_poll()
 						}
 					}
 
-					
-					
+					//Even after error we have to provide the block to the core
+					//Give an empty block.
 					if (!done)
 					{
 						if (sd_image[disk].type == 2)
@@ -3447,7 +3450,7 @@ void user_io_poll()
 					done = 1;
 				}
 
-				
+				// data is now stored in buffer. send it to fpga
 				EnableIO();
 				spi_w(UIO_SECTOR_RD | ack);
 				spi_block_write(buffer[disk] + offset, fio_size, sz);
@@ -3489,7 +3492,7 @@ void user_io_poll()
 
 	if (is_neogeo() && (!rtc_timer || CheckTimer(rtc_timer)))
 	{
-		
+		// Update once per minute should be enough
 		rtc_timer = GetTimer(60000);
 		send_rtc(1);
 	}
@@ -3530,17 +3533,17 @@ void user_io_poll()
 					kbd_reply(0x83);
 					break;
 
-				case 0xf0: 
+				case 0xf0: // scan get/set
 					kbd_reply(0xFA);
 					byte++;
 					break;
 
-				case 0xf6: 
+				case 0xf6: // set default parameters
 					kbd_reply(0xFA);
 					ps2_kbd_scan_set = 2;
 					break;
 
-				case 0xf3: 
+				case 0xf3: // set type rate
 					kbd_reply(0xFA);
 					byte++;
 					break;
@@ -3581,16 +3584,16 @@ void user_io_poll()
 					if (kbd_ctl <= 3)
 					{
 						kbd_reply(0xFA);
-						if (!kbd_ctl) kbd_reply(ps2_kbd_scan_set); 
-						else ps2_kbd_scan_set = kbd_ctl; 
+						if (!kbd_ctl) kbd_reply(ps2_kbd_scan_set); // get
+						else ps2_kbd_scan_set = kbd_ctl; // set
 					}
 					else
 					{
-						kbd_reply(0xFE); 
+						kbd_reply(0xFE); // RESEND
 					}
 					break;
 
-				case 0xf3: 
+				case 0xf3: // set type rate
 					kbd_reply(0xFA);
 					byte = 0;
 					break;
@@ -3740,13 +3743,13 @@ void user_io_poll()
 			video_mode_adjust();
 		}
 
-		
-
-
-
-
-
-
+		/*
+		uint32_t frcnt = spi_uio_cmd(UIO_GET_FR_CNT);
+		if (frcnt & 0x100)
+		{
+			printf("frames:%d\n", frcnt & 0xFF);
+		}
+		*/
 	}
 
 	static int prev_coldreset_req = 0;
@@ -3823,7 +3826,7 @@ static void send_keycode(unsigned short key, int press)
 {
 	if (is_pcxt())
 	{
-		
+		//WIN+... we override this hotkey in the core.
 		if (key == 125 || key == 126)
 		{
 			winkey_pressed = press;
@@ -3845,7 +3848,7 @@ static void send_keycode(unsigned short key, int press)
 		{
 			if (press)
 			{
-				
+				// send alternating make and break codes for caps lock
 				if(caps_lock_toggle) code |= 0x80;
 				caps_lock_toggle ^= HID_LED_CAPS_LOCK;
 				set_kbd_led(HID_LED_CAPS_LOCK, caps_lock_toggle);
@@ -3857,7 +3860,7 @@ static void send_keycode(unsigned short key, int press)
 		}
 		else
 		{
-			
+			// amiga has "break" marker in msb
 			if (!press) code |= 0x80;
 		}
 
@@ -3881,7 +3884,7 @@ static void send_keycode(unsigned short key, int press)
 			code |= OSD;
 		}
 
-		
+		// send immediately if possible
 		if (CheckTimer(kbd_timer) && (kbd_fifo_w == kbd_fifo_r))
 		{
 			kbd_fifo_minimig_send(code);
@@ -3900,21 +3903,21 @@ static void send_keycode(unsigned short key, int press)
 		uint32_t code = get_archie_code(key);
 		if (code == NONE) return;
 
-		
+		//WIN+...
 		if (get_key_mod() & (RGUI | LGUI))
 		{
 			switch (code)
 			{
-			case 0x00: code = 0xf;  
+			case 0x00: code = 0xf; //ESC = BRAKE
 				break;
 
-			case 0x11: code = 0x73; 
+			case 0x11: code = 0x73; // 1 = Mouse extra 1
 				break;
 
-			case 0x12: code = 0x74; 
+			case 0x12: code = 0x74; // 2 = Mouse extra 2
 				break;
 
-			case 0x13: code = 0x25; 
+			case 0x13: code = 0x25; // 3 = KP#
 				break;
 			}
 		}
@@ -3938,13 +3941,13 @@ static void send_keycode(unsigned short key, int press)
 		uint32_t code = get_ps2_code(key);
 		if (code == NONE) return;
 
-		
+		//pause
 		if ((code & 0xff) == 0xE1)
 		{
-			
+			// pause does not have a break code
 			if (press != 1)
 			{
-				
+				// Pause key sends E11477E1F014E077
 				static const unsigned char c[] = { 0xe1, 0x14, 0x77, 0xe1, 0xf0, 0x14, 0xf0, 0x77, 0x00 };
 				static const unsigned char c_set1[] = { 0xe1, 0x1d, 0x45, 0xe1, 0x9d, 0xc5, 0x00 };
 				const unsigned char *p = (ps2_kbd_scan_set == 1) ? c_set1 : c;
@@ -3962,7 +3965,7 @@ static void send_keycode(unsigned short key, int press)
 				DisableIO();
 			}
 		}
-		
+		// print screen
 		else if ((code & 0xff) == 0xE2)
 		{
 			if (press <= 1)
@@ -3997,10 +4000,10 @@ static void send_keycode(unsigned short key, int press)
 
 			spi_uio_cmd_cont(UIO_KEYBOARD);
 
-			
+			// prepend extended code flag if required
 			if (code & EXT) spi8(0xe0);
 
-			
+			// prepend break code if required
             if (!press)
             {
                 if (ps2_kbd_scan_set == 1)
@@ -4008,7 +4011,7 @@ static void send_keycode(unsigned short key, int press)
                     else
                         spi8(0xf0);
             }
-			
+			// send code itself
 			spi8(code & 0xff);
 
 			DisableIO();
@@ -4025,13 +4028,13 @@ static void send_keycode(unsigned short key, int press)
 
 			spi_uio_cmd_cont(UIO_KEYBOARD);
 
-			
+			// prepend extended code flag if required
 			if (code & EXT) spi8(0xe0);
 
-			
+			// prepend break code if required
 			if (!press) spi8(0xf0);
 
-			
+			// send code itself
 			spi8(code & 0xff);
 
 			DisableIO();
@@ -4065,24 +4068,24 @@ void user_io_mouse(unsigned char b, int16_t x, int16_t y, int16_t w)
 		{
 			unsigned char ps2_mouse[3];
 
-			
-			
-			
-			
+			// PS2 format:
+			// YOvfl, XOvfl, dy8, dx8, 1, mbtn, rbtn, lbtn
+			// dx[7:0]
+			// dy[7:0]
 			ps2_mouse[0] = (b & 7) | 8;
 
-			
-			
+			// ------ X axis -----------
+			// store sign bit in first byte
 			ps2_mouse[0] |= (x < 0) ? 0x10 : 0x00;
 			if (x < -255)
 			{
-				
+				// min possible value + overflow flag
 				ps2_mouse[0] |= 0x40;
-				ps2_mouse[1] = 1; 
+				ps2_mouse[1] = 1; // -255
 			}
 			else if (x > 255)
 			{
-				
+				// max possible value + overflow flag
 				ps2_mouse[0] |= 0x40;
 				ps2_mouse[1] = 255;
 			}
@@ -4091,19 +4094,19 @@ void user_io_mouse(unsigned char b, int16_t x, int16_t y, int16_t w)
 				ps2_mouse[1] = (char)x;
 			}
 
-			
-			
+			// ------ Y axis -----------
+			// store sign bit in first byte
 			y = -y;
 			ps2_mouse[0] |= (y < 0) ? 0x20 : 0x00;
 			if (y < -255)
 			{
-				
+				// min possible value + overflow flag
 				ps2_mouse[0] |= 0x80;
-				ps2_mouse[2] = 1; 
+				ps2_mouse[2] = 1; // -255;
 			}
 			else if (y > 255)
 			{
-				
+				// max possible value + overflow flag
 				ps2_mouse[0] |= 0x80;
 				ps2_mouse[2] = 255;
 			}
@@ -4115,7 +4118,7 @@ void user_io_mouse(unsigned char b, int16_t x, int16_t y, int16_t w)
 			if (w > 63) w = 63;
 			else if (w < -63) w = -63;
 
-			
+			// collect movement info and send at predefined rate
 			if (is_menu() && !video_fb_state()) printf("PS2 MOUSE: %x %d %d %d\n", ps2_mouse[0], ps2_mouse[1], ps2_mouse[2], w);
 
 			if (!osd_is_visible)
@@ -4131,29 +4134,29 @@ void user_io_mouse(unsigned char b, int16_t x, int16_t y, int16_t w)
 	}
 }
 
-
-
-
-
-#define EMU_BTN1  (0+(keyrah*4))  
-#define EMU_BTN2  (1+(keyrah*4))  
-#define EMU_BTN3  (2+(keyrah*4))  
-#define EMU_BTN4  (3+(keyrah*4))  
+/* usb modifer bits:
+0     1     2    3    4     5     6    7
+LCTRL LSHIFT LALT LGUI RCTRL RSHIFT RALT RGUI
+*/
+#define EMU_BTN1  (0+(keyrah*4)) // left control
+#define EMU_BTN2  (1+(keyrah*4)) // left shift
+#define EMU_BTN3  (2+(keyrah*4)) // left alt
+#define EMU_BTN4  (3+(keyrah*4)) // left gui (usually windows key)
 
 void user_io_check_reset(unsigned short modifiers, char useKeys)
 {
 	unsigned short combo[] =
 	{
-		0x45,  
-		0x89,  
-		0x105, 
+		0x45, // lctrl+lalt+ralt
+		0x89, // lctrl+lgui+rgui
+		0x105, // lctrl+lalt+del
 	};
 
 	if (useKeys >= (sizeof(combo) / sizeof(combo[0]))) useKeys = 0;
 
 	if ((modifiers & ~2) == combo[(uint)useKeys])
 	{
-		if (modifiers & 2) 
+		if (modifiers & 2) // with lshift - cold reset
 		{
 			coldreset_req = 1;
 		}
@@ -4175,7 +4178,7 @@ void user_io_check_reset(unsigned short modifiers, char useKeys)
 
 void user_io_osd_key_enable(char on)
 {
-	
+	//printf("OSD is now %s\n", on ? "visible" : "invisible");
 	osd_is_visible = on;
 	if (cfg.log_file_entry) MakeFile("/tmp/OSD_VISIBLE", on ? "1" : "0");
 	input_switch(-1);
@@ -4185,11 +4188,11 @@ void user_io_kbd(uint16_t key, int press)
 {
 	register_activity();
 
-	if(is_menu()) spi_uio_cmd(UIO_KEYBOARD); 
+	if(is_menu()) spi_uio_cmd(UIO_KEYBOARD); //ping the Menu core to wakeup
 
-	
+	// Win+PrnScr or Alt/Win+ScrLk - screen shot
 	bool key_WinPrnScr = (key == KEY_SYSRQ && (get_key_mod() & (RGUI | LGUI)));
-	
+	// Excluding scroll lock for PS/2 so Win+ScrLk can be used to change the emu mode.
 	bool key_AltWinScrLk = (key == KEY_SCROLLLOCK && (get_key_mod() & (LALT | RALT | RGUI | LGUI))) && !use_ps2ctl;
 	if (key_WinPrnScr || key_AltWinScrLk)
 	{
@@ -4246,7 +4249,7 @@ void user_io_kbd(uint16_t key, int press)
 				{
 
 					if (osd_is_visible) menu_key_set(UPSTROKE | key);
-					
+					// these modifiers should be passed to core even if OSD is open or they will get stuck!
 					if (!osd_is_visible || key == KEY_LEFTALT || key == KEY_RIGHTALT || key == KEY_LEFTMETA || key == KEY_RIGHTMETA) {send_keycode(key, press);}
 				}
 				if (is_menu_event) menu_key_set(KEY_F12 | UPSTROKE);
@@ -4266,9 +4269,9 @@ void user_io_kbd(uint16_t key, int press)
 				}
 				else
 				{
-					
-					
-					
+					// When ps2ctl is set then the RGUI or LGUI key must be held in addition
+					// to the EMU_SWITCH_1 or EMU_SWITCH_2. This allows for cores such as AO486
+					// to pass through the Scroll Lock and Num Lock keys.
 					bool ps2ctl_modifier = (get_key_mod() & (RGUI | LGUI)) || !use_ps2ctl;
 					bool key_EMU_SWITCH_1 = (code & EMU_SWITCH_1) && ps2ctl_modifier;
 					bool key_EMU_SWITCH_2 = (code & EMU_SWITCH_2) && ps2ctl_modifier && !is_archie();
@@ -4279,10 +4282,10 @@ void user_io_kbd(uint16_t key, int press)
 						{
 							int mode = emu_mode;
 
-							
-							
-							
-							
+							// all off: normal
+							// num lock on, scroll lock on: mouse emu
+							// num lock on, scroll lock off: joy0 emu
+							// num lock off, scroll lock on: joy1 emu
 
 							switch (code & 0xff)
 							{

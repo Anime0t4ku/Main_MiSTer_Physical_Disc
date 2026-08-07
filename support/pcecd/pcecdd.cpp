@@ -99,7 +99,7 @@ int pcecdd_t::LoadCUE(const char* filename) {
 		lptr = line;
 		while (*lptr == 0x20) lptr++;
 
-		
+		/* decode FILE commands */
 		if (!(memcmp(lptr, "FILE", 4)))
 		{
 			ptr = fname + strlen(fname) - 1;
@@ -142,7 +142,7 @@ int pcecdd_t::LoadCUE(const char* filename) {
 			}
 		}
 
-		
+		/* decode TRACK commands */
 		else if ((sscanf(lptr, "TRACK %02d %*s", &bb)) || (sscanf(lptr, "TRACK %d %*s", &bb)))
 		{
 			if (bb != (this->toc.last + 1))
@@ -152,7 +152,7 @@ int pcecdd_t::LoadCUE(const char* filename) {
 				break;
 			}
 
-			
+			//if (!this->toc.last)
 			{
 				if (strstr(lptr, "MODE1/2048"))
 				{
@@ -174,13 +174,13 @@ int pcecdd_t::LoadCUE(const char* filename) {
 					FileSeek(&this->toc.tracks[this->toc.last].f, 0, SEEK_SET);
 				}
 
-				
+				/*if (this->sectorSize)
+				{
+					this->toc.tracks[0].type = 1;
 
-
-
-
-
-
+					FileReadAdv(&this->toc.tracks[0].f, header, 0x210);
+					FileSeek(&this->toc.tracks[0].f, 0, SEEK_SET);
+				}*/
 			}
 
 			if (this->toc.last)
@@ -192,13 +192,13 @@ int pcecdd_t::LoadCUE(const char* filename) {
 			}
 		}
 
-		
+		/* decode PREGAP commands */
 		else if (sscanf(lptr, "PREGAP %02d:%02d:%02d", &mm, &ss, &bb) == 3)
 		{
 			pregap += bb + ss * 75 + mm * 60 * 75;
 		}
 
-		
+		/* decode INDEX commands */
 		else if ((sscanf(lptr, "INDEX 00 %02d:%02d:%02d", &mm, &ss, &bb) == 3) ||
 			(sscanf(lptr, "INDEX 0 %02d:%02d:%02d", &mm, &ss, &bb) == 3))
 		{
@@ -261,7 +261,7 @@ int pcecdd_t::Load(const char *filename)
 	const char *ext = filename+strlen(filename)-4;
 	if (!strcmp(filename, PHYSICAL_DISC_SENTINEL))
 	{
-		
+
 
 
 
@@ -294,7 +294,7 @@ int pcecdd_t::Load(const char *filename)
 		this->toc.tracks[this->toc.last].start = this->toc.end;
 		this->loaded = 1;
 
-		
+
 
 
 		if (!this->toc.phys)
@@ -383,8 +383,8 @@ void pcecdd_t::Update() {
 	buf[1] = 0 | 0x80;
 	buf[2] = this->state == PCECD_STATE_PAUSE ? 2 : (this->state == PCECD_STATE_PLAY ? 0 : 3);
 	buf[3] = 0;
-	buf[4] = BCD(this->index + 1);	
-	buf[5] = 1;	
+	buf[4] = BCD(this->index + 1); // Track
+	buf[5] = 1; // Pregap = index 0, TOC points to index 1; very few audio discs have more indexes
 
 	int lba_rel = this->lba - this->toc.tracks[this->index].start;
 	LBAToMSF(lba_rel, &msf);
@@ -421,7 +421,7 @@ void pcecdd_t::Update() {
 		DISKLED_ON;
 		if (this->toc.tracks[this->index].type)
 		{
-			
+			// CD-ROM (Mode 1)
 			sec_buf[0] = 0x00;
 			sec_buf[1] = 0x08 | 0x80;
 			ReadData(sec_buf + 2);
@@ -429,7 +429,7 @@ void pcecdd_t::Update() {
 			if (SendData)
 				SendData(sec_buf, 2048 + 2, PCECD_DATA_IO_INDEX);
 
-			
+			//printf("\x1b[32mPCECD: Data sector send = %i\n\x1b[0m", this->lba);
 		}
 		else
 		{
@@ -438,7 +438,7 @@ void pcecdd_t::Update() {
 				this->isData = 0x00;
 			}
 
-			
+			//SectorSend(0);
 		}
 
 		this->cnt--;
@@ -498,7 +498,7 @@ void pcecdd_t::Update() {
 				if (SendData)
 					SendData(sec_buf, 2352 + 2, PCECD_CDDA_IO_INDEX);
 
-				
+				//printf("\x1b[32mPCECD: Audio sector send = %i, track = %i, offset = %i\n\x1b[0m", this->lba, this->index, (this->lba * 2352) - this->toc.tracks[index].offset);
 
 				sec_buf[0] = 0x62;
 				sec_buf[1] = 0x00;
@@ -506,7 +506,7 @@ void pcecdd_t::Update() {
 				if (SendData)
 					SendData(sec_buf, 98 + 2, PCECD_SUBCODE_IO_INDEX);
 
-				
+				// printf("\x1b[32mPCECD: Subcode sector send lba = %i\n\x1b[0m", this->lba);
 			}
 			this->lba++;
 		}
@@ -550,7 +550,7 @@ void pcecdd_t::Update() {
 		if (SendData)
 			SendData(sec_buf, 98 + 2, PCECD_SUBCODE_IO_INDEX);
 
-		
+		//printf("\x1b[32mPCECD: PAUSE - Subcode sector send lba = %i\n\x1b[0m", this->lba);
 
 		if (this->latency > 0)
 		{
@@ -593,7 +593,7 @@ void pcecdd_t::CommandExec() {
 			SendStatus(MAKE_STATUS(PCECD_STATUS_GOOD, 0));
 		}
 
-		
+		// printf("\x1b[32mPCECD: Command TESTUNIT, state = %u\n\x1b[0m", state);
 		break;
 
 	case PCECD_COMM_REQUESTSENSE:
@@ -679,19 +679,19 @@ void pcecdd_t::CommandExec() {
 
 		this->index = index;
 
-		
-
+		/* HuVideo streams by fetching 120 sectors at a time, taking advantage of the geometry
+		 * of the disc to reduce/eliminate seek time */
 		if ((this->lba == new_lba) && (cnt_ == 120))
 		{
 			this->latency = 0;
 		}
-		
-
+		/* Sherlock Holmes streams by fetching 252 sectors at a time, and suffers
+		 * from slight pauses at each seek */
 		else if ((this->lba == new_lba) && (cnt_ == 252))
 		{
 			this->latency = 5;
 		}
-		else if (comm[13] & 0x80) 
+		else if (comm[13] & 0x80) // fast seek (OSD setting)
 		{
 			this->latency = 0;
 		}
@@ -757,7 +757,7 @@ void pcecdd_t::CommandExec() {
 		break;
 		}
 
-		if (comm[13] & 0x80) 
+		if (comm[13] & 0x80) // fast seek (OSD setting)
 		{
 			this->latency = 0;
 			this->audiodelay = 0;
@@ -818,9 +818,9 @@ void pcecdd_t::CommandExec() {
 		{
 			int track = U8(comm[2]);
 
-			
-			
-			
+			// Note that track (imput from PCE) starts numbering at 1
+			// but toc.tracks starts numbering at 0
+			//
 			if (!track)	track = 1;
 			new_lba = ((track-1) >= toc.last) ? this->toc.end : (this->toc.tracks[track - 1].start);
 		}
@@ -867,7 +867,7 @@ void pcecdd_t::CommandExec() {
 		CommandError(SENSEKEY_ILLEGAL_REQUEST, NSE_INVALID_COMMAND, 0, 0);
 
 		printf("\x1b[32mPCECD: Command undefined, [0] = %02X, [1] = %02X, [2] = %02X, [3] = %02X, [4] = %02X, [5] = %02X\n\x1b[0m", comm[0], comm[1], comm[2], comm[3], comm[4], comm[5]);
-		
+
 		has_status = 0;
 		SendStatus(MAKE_STATUS(PCECD_STATUS_CHECK_COND, 0));
 
@@ -896,7 +896,7 @@ void pcecdd_t::SendStatus(uint16_t status) {
 	spi_w(region ? 2 : 0);
 	DisableIO();
 
-	
+	//printf("\x1b[32mPCECD: Send status = %02X, message = %02X\n\x1b[0m", status & 0xFF, status >> 8);
 }
 
 void pcecdd_t::SendDataRequest() {
@@ -939,7 +939,7 @@ void pcecdd_t::ReadData(uint8_t *buf)
 	{
 		if (this->toc.phys)
 		{
-			
+
 			physical_disc_read_data2048(this->lba, buf);
 		}
 		else if (this->toc.chd_f)
@@ -965,13 +965,13 @@ void pcecdd_t::ReadData(uint8_t *buf)
 
 int pcecdd_t::ReadCDDA(uint8_t *buf)
 {
-	this->audioLength = 2352;
-	this->audioOffset = 0;
+	this->audioLength = 2352; // 2352 + 2352 - this->audioOffset;
+	this->audioOffset = 0; // 2352;
 
 
 	if (this->toc.phys)
 	{
-		
+
 
 		physical_disc_read_sector(this->lba, buf, NULL);
 	}
@@ -999,33 +999,33 @@ void pcecdd_t::ReadSubcode(int lba, uint8_t* buf)
 	int i, j;
 	uint8_t msb, lsb, x;
 
-	buf[0] = 0x00;	
+	buf[0] = 0x00; // synchronization word while playing
 	buf[1] = 0x80;
 
-	if ((lba != last_lba) && (this->latency == 0)) {	
-		if (this->subcode_file) {			
+	if ((lba != last_lba) && (this->latency == 0)) { // continue sending old subcode data until head arrives at new location
+		if (this->subcode_file) { // read subcode data from file if it exists
 			fseek(this->subcode_file, (lba * 96), SEEK_SET);
 			fread(subc, 96, 1, this->subcode_file);
 		}
-		else						
+		else // else synthesize subcode Q data
 		{
 			memset((void*)subc, 0x00, 96);
-			subc[12] = 1;				
-			subc[13] = BCD(this->index + 1);	
-			subc[14] = 1;				
+			subc[12] = 1; // Timing Data
+			subc[13] = BCD(this->index + 1); // Track
+			subc[14] = 1; // Index (Pregap = index 0, Music = index 1; assume 1)
 
 			int lba_rel = this->lba - this->toc.tracks[this->index].start;
 			LBAToMSF(lba_rel, &msf);
-			subc[15] = BCD(msf.m);			
+			subc[15] = BCD(msf.m); // M:S:F offset from start of track
 			subc[16] = BCD(msf.s);
 			subc[17] = BCD(msf.f);
 
 			LBAToMSF(this->lba + 150, &msf);
-			subc[19] = BCD(msf.m);			
+			subc[19] = BCD(msf.m); // M:S:F offset from start of disc session
 			subc[20] = BCD(msf.s);
 			subc[21] = BCD(msf.f);
 
-			msb = 0;				
+			msb = 0; // Calculate subcode-Q checksum data
 			lsb = 0;
 			for (i = 12; i < 22; i++) {
 				x = subc[i] ^ msb;
@@ -1036,18 +1036,18 @@ void pcecdd_t::ReadSubcode(int lba, uint8_t* buf)
 			subc[22] = msb ^ 0xff;
 			subc[23] = lsb ^ 0xff;
 
-			
+			// printf("\x1b[32mPCECD: SYNTH - Subcode sector lba = %i\n\x1b[0m", lba);
 		}
 
 		last_lba = lba;
 	}
 
-	
+	// printf("\x1b[32mPCECD: Subcode sector latency = %d, lba = %i, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d\n\x1b[0m", this->latency, lba, subc[12], subc[13], subc[14], subc[15], subc[16], subc[17], subc[18], subc[19], subc[20], subc[21], subc[22], subc[23]);
 
 	for (i = 0; i < 96; i++)
 	{
 		int code = 0;
-		for (j = 0; j < 8; j++)	
+		for (j = 0; j < 8; j++) // subcode P = 0; subcode Q = 1, etc.
 		{
 			uint8_t bits = subc[(j * 12) + (i >> 3)] >> (7 - (i & 7));
 			code |= ((bits & 1) << (7 - j));

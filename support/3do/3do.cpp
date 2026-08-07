@@ -86,7 +86,7 @@ static void p3do_mount_save(const char *filename)
 		p3do_get_save_without_disk(buf);
 #ifdef P3DO_DEBUG
 		printf("Saturn save filename = %s\n", buf);
-#endif 
+#endif // P3DO_DEBUG
 		user_io_file_mount(buf, 0, 1);
 	}
 	else
@@ -122,7 +122,7 @@ int p3do_set_image(int num, const char *filename)
 	p3docdd.Unload();
 	p3docdd.Reset();
 
-	int same_game = 0;
+	int same_game = 0; //*filename && *last_dir && !strncmp(last_dir, filename, strlen(last_dir));
 	strcpy(last_dir, filename);
 	char *p = strrchr(last_dir, '/');
 	if (p) *p = 0;
@@ -134,14 +134,13 @@ int p3do_set_image(int num, const char *filename)
 		user_io_status_set("[0]", 1);
 		p3do_reset();
 
-		
-		
+		// load CD BIOS
 		int bios_loaded = 1;
 		if (phys || !p3do_load_rom(filename, "cd_bios.rom", 0)) 
 		{
 			if (phys || !p3do_load_rom(last_dir, "cd_bios.rom", 0)) 
 			{
-				sprintf(buf, "%s/boot.rom", HomeDir()); 
+				sprintf(buf, "%s/boot.rom", HomeDir()); // from home folder.
 				if (!user_io_file_tx(buf))
 				{
 					bios_loaded = 0;
@@ -150,11 +149,11 @@ int p3do_set_image(int num, const char *filename)
 			}
 		}
 
-		
+
 		if (bios_loaded && !phys) {
-			if (!p3do_load_rom(filename, "kanji.rom", 3)) 
+			if (!p3do_load_rom(filename, "kanji.rom", 3)) // from disk folder.
 			{
-				if (!p3do_load_rom(last_dir, "kanji.rom", 3)) 
+				if (!p3do_load_rom(last_dir, "kanji.rom", 3)) // from parent folder.
 				{
 
 				}
@@ -173,7 +172,7 @@ int p3do_set_image(int num, const char *filename)
 
 			if (!audio_only && !same_game)
 			{
-				
+
 				char save_name[64] = "physical_disc";
 				if (phys) physical_disc_save_name(PHYSICAL_DISC_DISC_3DO, save_name, sizeof(save_name));
 				p3do_mount_save(phys ? save_name : filename);
@@ -188,7 +187,7 @@ int p3do_set_image(int num, const char *filename)
 
 	user_io_status_set("[0]", 0);
 
-	
+
 	return mounted;
 }
 
@@ -197,7 +196,7 @@ void p3do_reset() {
 }
 
 int p3do_send_data(uint8_t* buf, int len, uint8_t index) {
-	
+	// set index byte
 	user_io_set_index(index);
 
 	user_io_set_download(1);

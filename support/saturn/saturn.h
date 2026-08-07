@@ -6,6 +6,8 @@
 
 
 
+// CDD command
+//#define SATURN_DEBUG				1
 #define SATURN_COMM_NOP				0x00
 #define SATURN_COMM_SEEK_RING		0x02
 #define SATURN_COMM_TOC				0x03
@@ -16,7 +18,7 @@
 #define SATURN_COMM_FW_SCAN			0x0A
 #define SATURN_COMM_RW_SCAN			0x0B
 
-
+// CDD status
 #define SATURN_STAT_NOP				0x00
 #define SATURN_STAT_TOC				0x06
 #define SATURN_STAT_STOP			0x12
@@ -117,7 +119,7 @@ extern uint32_t saturn_frame_cnt;
 
 #define CD_DATA_IO_INDEX	0x8
 #define BOOT_IO_INDEX	    0xC
-#define SAVE_IO_INDEX		0x4 
+#define SAVE_IO_INDEX		0x4 // fake download to trigger save loading
 
 void saturn_poll();
 int saturn_set_image(int num, const char *filename);

@@ -10,7 +10,7 @@ typedef enum
         SUBCODE_NONE = 0, SUBCODE_RW, SUBCODE_RW_RAW
 } cd_subcode_types_t;
 
-
+/// Values according to the raw value in TOC A0
 enum DiscType {
 	DT_CDDA = 0x00,
 	DT_CDROM = 0x00,

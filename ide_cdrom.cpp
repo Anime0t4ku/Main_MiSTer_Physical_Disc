@@ -1107,10 +1107,10 @@ static int disc_info(drive_t *drv, uint16_t maxlen)
 	ide_buf[7] = 0x20;  		/* Disc defined for unrestricted use */
 	ide_buf[8] = 0x00;  		/* CD-Rom Disk */
 
-	
+
 	memset(ide_buf+16, 0xFF, 4);	/* Lead-in Start Time for Last Session, all 0xFF if disc is complete*/
 	memset(ide_buf+20, 0xFF, 4);	/* Last Possible Start Time for Start Time of Lead-out, all 0xFF if disc is complete*/
-	
+
 	dbg_hexdump(ide_buf, maxlen, 0);
 	return maxlen;
 }
@@ -1161,7 +1161,7 @@ static void get_conf(ide_config *ide, uint8_t* cmdbuf, uint16_t maxlen) {
 		if (maxlen > 16) {
 			maxlen = 16;
 		}
-		
+
 		memset(ide_buf, 0, 16);		
 		ide_buf[3] = 0x0F;			// Length LSB (Word 0-3)
 									// Word 4 Reserved
@@ -1432,7 +1432,7 @@ void cdrom_handle_pkt(ide_config *ide)
 		} 
 		else cdrom_nodisk(ide);
 		break;
-	
+
 	case 0x4E: // stop play/scan
 		dbg_printf("** Stop Play/Scan\n");
 		drv->playing = 0;
@@ -1444,18 +1444,18 @@ void cdrom_handle_pkt(ide_config *ide)
 		dbg_printf("** Inquiry\n");
 		pkt_send(ide, ide_buf, cd_inquiry(cmdbuf[4]));
 		break;
-	
+
 	case 0x35: // synchronize cache
 		dbg_printf("** synchronize cache\n");
 		dbg_hexdump(cmdbuf, 10, 0);
 		cdrom_reply(ide,0);
 		break;
-	
+
 	case 0x46: // get configuration
 		dbg_printf("** get configuration\n");
 		get_conf(ide, cmdbuf, cmdbuf[7] << 8 | cmdbuf[8]);
 		break;
-	
+
 	case 0x51: // read disc information
 		dbg_printf("** read disc information\n");
 		dbg_hexdump(cmdbuf, 12, 0);
@@ -1465,7 +1465,7 @@ void cdrom_handle_pkt(ide_config *ide)
 		} 
 		else err = 1;
 		break;
-	
+
 	case 0x52: // read track information
 		dbg_printf("** read track information\n");	
 		dbg_hexdump(cmdbuf, 12, 0);
@@ -1695,6 +1695,7 @@ const char* cdrom_parse(uint32_t num, const char *filename)
 		if (!res) res = load_cue_file(&ide_inst[num].drive[drv], path);
 		if (!res) res = load_iso_file(&ide_inst[num].drive[drv], path);
 	}
+
 	return res;
 }
 

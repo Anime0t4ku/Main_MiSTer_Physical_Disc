@@ -1,7 +1,7 @@
 #ifndef PCECD_H
 #define PCECD_H
 
-
+// CDD command
 #define PCECD_COMM_TESTUNIT			0x00
 #define PCECD_COMM_REQUESTSENSE		0x03
 #define PCECD_COMM_READ6			0x08
@@ -132,7 +132,7 @@ private:
 
 #define CD_SCAN_SPEED 30
 
-
+//pcecdd.cpp
 extern pcecdd_t pcecdd;
 
 

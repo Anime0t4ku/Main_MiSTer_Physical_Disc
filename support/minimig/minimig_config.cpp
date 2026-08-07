@@ -92,7 +92,6 @@ static void SendFileV2(fileTYPE* file, unsigned char* key, int keysize, int addr
 	printf("]\n");
 }
 
-
 static char UploadKickstart(char *name)
 {
 	fileTYPE file = {};

@@ -21,19 +21,19 @@ static uint32_t CalcTimerOffset(uint8_t speed) {
 
 	uint32_t offs;
 	if (speed == 2) {
-		offs = 6 + ((adj2 & 0x03) != 0x00 ? 1 : 0);	
+		offs = 6 + ((adj2 & 0x03) != 0x00 ? 1 : 0); //6.6
 		adj2 <<= 1;
 		if (adj2 >= 0x08) adj2 = 0x01;
 		adj0 = adj1 = 0x1;
 	}
 	else if (speed == 1) {
-		offs = 13 + ((adj1 & 0x01) != 0x00 ? 1 : 0);	
+		offs = 13 + ((adj1 & 0x01) != 0x00 ? 1 : 0); //13.3
 		adj1 <<= 1;
 		if (adj1 >= 0x08) adj1 = 0x01;
 		adj0 = adj2 = 0x1;
 	}
 	else {
-		offs = 16 + ((adj0 & 0x03) != 0x00 ? 1 : 0);	
+		offs = 16 + ((adj0 & 0x03) != 0x00 ? 1 : 0); //16.7
 		adj0 <<= 1;
 		if (adj0 >= 0x08) adj0 = 0x01;
 		adj1 = adj2 = 0x1;
@@ -65,7 +65,7 @@ void saturn_poll()
 	static unsigned long poll_timer = 0;
 	static uint8_t last_req = 255;
 
-	
+
 
 
 
@@ -78,7 +78,7 @@ void saturn_poll()
 		if (physical_disc_swap_ejected()) satcdd.SwapOpen();
 		if (physical_disc_swap_consume() && satcdd.SwapPhys())
 		{
-			
+
 
 
 
@@ -137,12 +137,12 @@ void saturn_poll()
 			printf("\x1b[32mSaturn: ");
 			printf("Time over: next = %lu, curr = %lu", poll_timer, curr_timer);
 			printf("\n\x1b[0m");
-#endif 
+#endif // SATURN_DEBUG
 		}
 #ifdef SATURN_DEBUG
 		else 
 			user_io_status_set("[63]", 0);
-#endif 
+#endif // SATURN_DEBUG
 	}
 }
 
@@ -183,7 +183,7 @@ void saturn_mount_save(const char *filename, bool is_auto)
 		}
 #ifdef SATURN_DEBUG
 		printf("Saturn save filename = %s\n", buf);
-#endif 
+#endif // SATURN_DEBUG
 		user_io_file_mount(buf, 1, 1);
 	}
 	else
@@ -222,7 +222,7 @@ int saturn_set_image(int num, const char *filename)
 	physical_disc_swap_enable(0);              
 
 	int same_game = *filename && *last_dir && !strncmp(last_dir, filename, strlen(last_dir));
-	
+
 
 
 
@@ -240,10 +240,10 @@ int saturn_set_image(int num, const char *filename)
 		user_io_status_set("[0]", 1);
 		saturn_reset();
 
-		
-		
-		
-		
+
+
+
+
 		int bios_loaded = 0;
 		if (!phys) 
 		{
@@ -252,7 +252,7 @@ int saturn_set_image(int num, const char *filename)
 		}
 		if (!bios_loaded)
 		{
-			sprintf(buf, "%s/boot.rom", HomeDir()); 
+			sprintf(buf, "%s/boot.rom", HomeDir()); // from home folder.
 			if (!user_io_file_tx(buf))
 			{
 				Info("CD BIOS not found!", 4000);
@@ -274,12 +274,12 @@ int saturn_set_image(int num, const char *filename)
 
 			if (!audio_only && !same_game && reset_after_insert_disc)
 			{
-				
-				
+
+
 				char save_name[64] = "physical_disc";
 				if (phys) physical_disc_save_name(PHYSICAL_DISC_DISC_SATURN, save_name, sizeof(save_name));
 				saturn_mount_save(phys ? save_name : filename, true);
-				
+
 			}
 
 			if (!audio_only && satcdd.GetBootHeader((uint8_t*)buf) > 0)
@@ -292,8 +292,8 @@ int saturn_set_image(int num, const char *filename)
 
 	user_io_status_set("[0]", 0);
 
-	
-	
+
+
 	return mounted;
 }
 
@@ -302,7 +302,7 @@ void saturn_reset() {
 }
 
 int saturn_send_data(uint8_t* buf, int len, uint8_t index) {
-	
+	// set index byte
 	user_io_set_index(index);
 
 	user_io_set_download(1);

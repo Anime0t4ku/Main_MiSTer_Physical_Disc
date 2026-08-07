@@ -2,6 +2,10 @@
 
 
 
+// cfg.c
+// 2015, rok.krajnc@gmail.com
+// 2017+, Sorgelig
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -67,8 +71,8 @@ static const ini_var_t ini_vars[] =
 	{ "MENU_PAL", (void*)(&(cfg.menu_pal)), UINT8, 0, 1 },
 	{ "BOOTCORE", (void*)(&(cfg.bootcore)), STRING, 0, sizeof(cfg.bootcore) - 1 },
 	{ "BOOTCORE_TIMEOUT", (void*)(&(cfg.bootcore_timeout)), INT16, 2, 30 },
-	
-	
+
+
 	{ "PHYSICAL_DISC_MGL", (void*)(&(cfg.physical_disc_launch)), UINT8, 0, 1 },
 	{ "PHYSICAL_DISC_MOUNT_DELAY", (void*)(&(cfg.physical_disc_mount_delay)), UINT8, 0, 30 },
 	{ "PHYSICAL_DISC_ACOUSTIC", (void*)(&(cfg.physical_disc_acoustic)), UINT8, 0, 1 },
@@ -216,7 +220,7 @@ static int ini_get_section(char* buf, const char *vmode)
 	int i = 0;
 	int incl = (buf[0] == INCL_SECTION);
 
-	
+	// get section start marker
 	if (buf[0] != INI_SECTION_START && buf[0] != INCL_SECTION)
 	{
 		return 0;
@@ -226,7 +230,7 @@ static int ini_get_section(char* buf, const char *vmode)
 	int wc_pos = -1;
 	int eq_pos = -1;
 
-	
+	// get section stop marker
 	while (buf[i])
 	{
 		if (buf[i] == INI_SECTION_END)
@@ -348,12 +352,12 @@ static void ini_parse_numeric(const ini_var_t *var, const char *text, void *out)
 	}
 }
 
-
+// Used to determine if an array variable should be appended or restarted.
 static bool var_array_append[sizeof(ini_vars) / sizeof(ini_var_t)] = {};
 
 static void ini_parse_var(char* buf)
 {
-	
+	// find var
 	int i = 0;
 	while (1)
 	{
@@ -366,7 +370,7 @@ static void ini_parse_var(char* buf)
 		i++;
 	}
 
-	
+	// parse var
 	int var_id = -1;
 	for (int j = 0; j < (int)(sizeof(ini_vars) / sizeof(ini_var_t)); j++)
 	{
@@ -377,7 +381,7 @@ static void ini_parse_var(char* buf)
 	{
 		cfg_error("%s: unknown option", buf);
 	}
-	else 
+	else // get data
 	{
 		i++;
 		while (buf[i] == '=' || CHAR_IS_SPACE(buf[i])) i++;
@@ -482,16 +486,16 @@ static void ini_parse(int alt, const char *vmode)
 
 	ini_pt = 0;
 
-	
+	// parse ini
 	while (1)
 	{
-		
+		// get line
 		eof = ini_getline(line);
 		ini_parser_debugf("line(%d): \"%s\".", section, line);
 
 		if (line[0] == INI_SECTION_START)
 		{
-			
+			// if first char in line is INI_SECTION_START, get section
 			section = ini_get_section(line, vmode);
 			if (section)
 			{
@@ -508,11 +512,11 @@ static void ini_parse(int alt, const char *vmode)
 		}
 		else if(section)
 		{
-			
+			// otherwise this is a variable, get it
 			ini_parse_var(line);
 		}
 
-		
+		// if end of file, stop
 		if (eof) break;
 	}
 
@@ -629,7 +633,7 @@ void cfg_parse()
 	ini_parse(altcfg(), video_get_core_mode_name(1));
 	if (has_video_sections && !using_video_section)
 	{
-		
+		// second pass to look for section without vrefresh
 		ini_parse(altcfg(), video_get_core_mode_name(0));
 	}
 
@@ -817,7 +821,7 @@ void yc_parse(yc_mode *yc_table, int max)
 
 	while (n < max)
 	{
-		
+		// get line
 		eof = ini_getline(line);
 		if (!strncasecmp(line, corename, corename_len))
 		{
@@ -825,7 +829,7 @@ void yc_parse(yc_mode *yc_table, int max)
 			if (res) n++;
 		}
 
-		
+		// if end of file, stop
 		if (eof) break;
 	}
 

@@ -25,20 +25,20 @@
 
 #define TIMEKEEPER_SIZE (8 * 1024)
 
-
-
-
+/// Size of subchannel data in CloneCD .SUB images
+/// Matches also the size in .CHD images
+/// Also matches the size for the CDIC.
 #define SUBCHANNEL_RW_SIZE 96
 
 static constexpr auto SERVO_AUDIO_CD_OPT = "[12]";
 
-
-
+/// It is written, only on CD-i, this data can be found at timecode 00:02:16
+// clang-format off
 static const uint8_t mode2_bootheader[] = {
-	0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 
-	0x00, 0x02, 0x16														
+	0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, // Sync words
+	0x00, 0x02, 0x16 // MSF
 };
-
+// clang-format on
 
 struct subcode
 {
@@ -55,7 +55,7 @@ struct subcode
 	uint16_t mode1_crc0;
 	uint16_t mode1_crc1;
 
-	
+	// Subcode RW in interleaved form
 	uint16_t rw[SUBCHANNEL_RW_SIZE];
 };
 static_assert(sizeof(struct subcode) == CDI_SUBCHANNEL_LEN);
@@ -193,7 +193,7 @@ static int load_cue(const char* filename, toc_t* table)
 		return 0;
 	}
 
-	
+	// Try to open a CloneCD type subcode file
 	memcpy(&fname[strlen(fname) - 4], ".sub", 4);
 	if (FileOpen(&toc.sub, getFullPath(fname)))
 	{
@@ -221,7 +221,7 @@ static int load_cue(const char* filename, toc_t* table)
 		while (*lptr == 0x20)
 			lptr++;
 
-		
+		/* decode FILE commands */
 		if (!(memcmp(lptr, "FILE", 4)))
 		{
 			ptr = fname + strlen(fname) - 1;
@@ -262,12 +262,12 @@ static int load_cue(const char* filename, toc_t* table)
 			}
 		}
 
-		
+		/* decode PREGAP commands */
 		else if (sscanf(lptr, "PREGAP %02d:%02d:%02d", &mm, &ss, &bb) == 3)
 		{
-			
+			// TODO Find an example image
 		}
-		
+		/* decode TRACK commands */
 		else if ((sscanf(lptr, "TRACK %02d %*s", &bb)) || (sscanf(lptr, "TRACK %d %*s", &bb)))
 		{
 			index0 = 0;
@@ -284,7 +284,7 @@ static int load_cue(const char* filename, toc_t* table)
 
 			table->tracks[table->last].sector_size = CDI_SECTOR_LEN;
 			if (!table->last)
-				table->end = 150; 
+				table->end = 150; // implicit 2 seconds pregap for track 1
 
 			if (mode1)
 				table->tracks[table->last].type = TT_MODE1;
@@ -300,7 +300,7 @@ static int load_cue(const char* filename, toc_t* table)
 			}
 		}
 
-		
+		/* decode INDEX commands */
 		else if ((sscanf(lptr, "INDEX 00 %02d:%02d:%02d", &mm, &ss, &bb) == 3) ||
 				 (sscanf(lptr, "INDEX 0 %02d:%02d:%02d", &mm, &ss, &bb) == 3))
 		{
@@ -313,13 +313,13 @@ static int load_cue(const char* filename, toc_t* table)
 
 			if (!table->tracks[table->last].f.opened())
 			{
-				
+				// Catch absent INDEX0 (no pregap) to fix calculations afterwards
 				if (!index0)
 					index0 = index1;
 
 				table->tracks[table->last].start = index1 + 150;
 				table->tracks[table->last].pregap = index1 - index0;
-				
+				// Subtract the fake 150 sector pregap used for the first data track
 				table->tracks[table->last].offset = index0 * table->tracks[table->last].sector_size;
 				table->tracks[table->last - 1].end =
 					table->tracks[table->last].start - 1 - table->tracks[table->last].pregap;
@@ -429,6 +429,12 @@ static int load_cd_image(const char* filename, toc_t* table)
 	}
 	}
 
+	// On a CDI 210/05 the SERVO has to provide the info
+	// on whether this is an Audio CD to the SLAVE,
+	// which then gives the info to the CDIC driver running on the main CPU.
+	// The real source and how this is calculated is yet unknown
+	// We use sector 00:02:16 as reference as it contains the boot block.
+	// If this is a suitable MODE2 header, we assume it is a CD-i disc
 	auto buffer = std::make_unique<uint8_t[]>(CDI_CDIC_BUFFER_SIZE);
 	if (buffer)
 	{
@@ -438,17 +444,17 @@ static int load_cd_image(const char* filename, toc_t* table)
 		user_io_status_set(SERVO_AUDIO_CD_OPT, is_audio_cd ? 1 : 0);
 	}
 
-	
-
-
-
-
-
-
-
-
-
-
+	/*
+	 * The Disc Type in the TOC needs to be correct for some applications.
+	 * For calculation, we use the same algorithm, used by cdrdao
+	 * https://github.com/cdrdao/cdrdao/blob/87a1db17571162803d62fb058d911c17ba93e18e/trackdb/Cue2Toc.cc#L666C26-L666C48
+	 * CD_DA      only audio
+	 * CD_ROM     only mode1 with or without audio
+	 * CD_ROM_XA  only mode2 with or without audio
+	 * There is also the CDI disc type, though it seems that most burning software
+	 * doesn't support it. And - so far - all my discs worked on real hardware.
+	 * So we avoid using DT_CDI for now...
+	 */
 	bool audio{false};
 	bool mode1{false};
 	bool mode2{false};
@@ -474,7 +480,7 @@ static int load_cd_image(const char* filename, toc_t* table)
 		disc_type = DT_CDROM;
 	else if ((audio && !mode1 && mode2) || (!audio && !mode1 && mode2))
 		disc_type = DT_CDROMXA;
-	
+	// printf("Disc Type %d%d%d %x\n", audio, mode1, mode2, disc_type);
 	return result;
 }
 
@@ -554,6 +560,8 @@ int cdi_chd_hunksize()
 
 
 
+// CRC routine from https://github.com/mamedev/mame/blob/master/src/mame/philips/cdicdic.cpp
+// clang-format off
 const uint16_t s_crc_ccitt_table[256] =
 	{
 		0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50a5, 0x60c6, 0x70e7,
@@ -591,7 +599,7 @@ const uint16_t s_crc_ccitt_table[256] =
 
 #define CRC_CCITT_ROUND(accum, data) (((accum << 8) | data) ^ s_crc_ccitt_table[accum >> 8])
 
-
+// sector descrambling routine from https://github.com/mamedev/mame/blob/master/src/mame/philips/cdicdic.cpp
 const uint8_t s_sector_scramble[] =
 	{
 		0x01, 0x80, 0x00, 0x60, 0x00, 0x28, 0x00, 0x1e, 0x80, 0x08, 0x60, 0x06, 0xa8, 0x02, 0xfe, 0x81,
@@ -742,7 +750,7 @@ const uint8_t s_sector_scramble[] =
 		0x5a, 0x89, 0xfb, 0x26, 0xc3, 0x5a, 0xd1, 0xfb, 0x1c, 0x43, 0x49, 0xf1, 0xf6, 0xc4, 0x46, 0xd3,
 		0x72, 0xdd, 0xe5, 0x99};
 
-
+// clang-format on
 
 void descramble_sector(uint8_t* buffer)
 {
@@ -759,17 +767,17 @@ static inline uint32_t unBCD(uint32_t val)
 
 void check_scramble(int lba, uint8_t* buffer)
 {
-	
-	
+	// Check for sync pattern to confirm mode 2
+	// Starts and ends with 0x00 and ...
 	if ((buffer[0] != 0) || (buffer[11] != 0))
 		return;
 
-	
+	// ... inbetween there are 0xff bytes
 	for (uint32_t i = 01; i < 11; i++)
 		if (buffer[i] != 0xff)
 			return;
 
-	
+	// Sync pattern confirmed. check validity of mode2 header
 	uint32_t mm, ss, ff;
 	uint8_t mode;
 
@@ -781,11 +789,11 @@ void check_scramble(int lba, uint8_t* buffer)
 
 	if (mode2_lba == lba && mode == 2)
 	{
-		
+		// Is a valid header. Do nothing
 	}
 	else
 	{
-		
+		// Can we fix it? Let's test on 4 bytes
 		mm = unBCD(buffer[12] ^ s_sector_scramble[0]);
 		ss = unBCD(buffer[13] ^ s_sector_scramble[1]);
 		ff = unBCD(buffer[14] ^ s_sector_scramble[2]);
@@ -799,10 +807,10 @@ void check_scramble(int lba, uint8_t* buffer)
 }
 
 
-
-
-
-
+/// Interleave non-interleaved subchannel data for use with the CDIC
+/// Required for processing CloneCD subchannel images
+/// The CDIC expects interleaved subcode data in words. Only the low 6 bits are used for RSTUVW
+/// The upper 12 bits are usually one, but we can skip this here, the software doesn't care
 void reinterleave_rw_subchannels(const uint8_t rw[6][12], uint16_t raw[SUBCHANNEL_RW_SIZE])
 {
 	memset(raw, 0, sizeof(uint16_t) * SUBCHANNEL_RW_SIZE);
@@ -822,8 +830,8 @@ void reinterleave_rw_subchannels(const uint8_t rw[6][12], uint16_t raw[SUBCHANNE
 	}
 }
 
-
-
+/// The CDIC expects interleaved subcode data in words. Only the low 6 bits are used for RSTUVW
+/// The upper 12 bits are usually one, but we can skip this here, the software doesn't care
 void subcode_rw_byte_to_word_map(const uint8_t b[SUBCHANNEL_RW_SIZE], uint16_t raw[SUBCHANNEL_RW_SIZE])
 {
 	for (int i = 0; i < SUBCHANNEL_RW_SIZE; i++)
@@ -832,12 +840,12 @@ void subcode_rw_byte_to_word_map(const uint8_t b[SUBCHANNEL_RW_SIZE], uint16_t r
 	}
 }
 
-
+/// Provides a deinterleaved view on subcode Q as expected by the CDIC
 void subcode_q_data(int lba, struct subcode& out)
 {
 	if (lba < 0)
 	{
-		
+		// TOC is expected by the core at lba -65536
 		lba += 65536;
 
 		uint8_t am, as, af;
@@ -846,12 +854,12 @@ void subcode_q_data(int lba, struct subcode& out)
 		as = rem_lba / 75;
 		af = rem_lba % 75;
 
-		if (toc_entry_count == 0) 
+		if (toc_entry_count == 0) // catch division by zero
 			return;
 		auto& toc_entry = toc_buffer[lba % toc_entry_count];
 
 		out.control = htons(toc_entry.control);
-		out.track = 0; 
+		out.track = 0; // Track 0 for TOC
 		out.index = htons(toc_entry.track);
 		out.mode1_mins = htons(BCD(am));
 		out.mode1_secs = htons(BCD(as));
@@ -881,8 +889,8 @@ void subcode_q_data(int lba, struct subcode& out)
 
 		if (track_lba < 0)
 		{
-			
-			
+			// Fix index 0 tracks which are defined as pause
+			// The timecode seems to go backwards on a real machine
 			track_lba = -track_lba;
 			index = 0;
 		};
@@ -950,13 +958,13 @@ void cdi_read_cd(uint8_t* buffer, int lba, int cnt)
 	{
 		if (lba < 0 || !toc.last)
 		{
-			
+			// TOC area
 			memset(buffer, 0, CDI_SECTOR_LEN);
 			buffer += CDI_SECTOR_LEN;
 			struct subcode& subcode_out = *reinterpret_cast<struct subcode*>(buffer);
 			subcode_q_data(lba, subcode_out);
 
-			
+			// Force zero to avoid accidental CD+G detection in CD player
 			memset(subcode_out.rw, 0, sizeof(subcode_out.rw));
 
 			buffer += sizeof(struct subcode);
@@ -1008,7 +1016,7 @@ void cdi_read_cd(uint8_t* buffer, int lba, int cnt)
 
 						if (toc.sub.opened())
 						{
-							
+							// The "fake" 150 sector pregap moves all the LBAs up by 150, so adjust here to read where the core actually wants data from
 							int read_lba = std::max(0, lba - 150);
 							if (sub_loaded_from_cdg)
 							{
@@ -1035,8 +1043,9 @@ void cdi_read_cd(uint8_t* buffer, int lba, int cnt)
 
 						if (toc.chd_f)
 						{
-							
+							// The "fake" 150 sector pregap moves all the LBAs up by 150, so adjust here to read where the core actually wants data from
 							int read_lba = lba - 150;
+
 							if (mister_chd_read_sector(toc.chd_f,
 													   (read_lba + toc.tracks[i].offset),
 													   0,
@@ -1046,7 +1055,7 @@ void cdi_read_cd(uint8_t* buffer, int lba, int cnt)
 													   chd_hunkbuf,
 													   &chd_hunknum) == CHDERR_NONE)
 							{
-								if (!toc.tracks[i].type) 
+								if (!toc.tracks[i].type) // CHD requires byteswap of audio data
 								{
 									for (int swapidx = 0; swapidx < CDI_SECTOR_LEN; swapidx += 2)
 									{
@@ -1061,7 +1070,7 @@ void cdi_read_cd(uint8_t* buffer, int lba, int cnt)
 								printf("\x1b[32mCDI: CHD read error: %d\n\x1b[0m", lba);
 							}
 
-							
+							//Just use the read sector call with an offset, since we previously read that sector, it is already in the hunk cache
 							if (toc.tracks[i].sbc_type == SUBCODE_RW_RAW || toc.tracks[i].sbc_type == SUBCODE_RW)
 							{
 								if (mister_chd_read_sector(toc.chd_f,
@@ -1083,7 +1092,7 @@ void cdi_read_cd(uint8_t* buffer, int lba, int cnt)
 
 							if (toc.tracks[i].sbc_type == SUBCODE_RW)
 							{
-								
+								// TODO Needs test image to verify
 								reinterleave_subcode = true;
 							}
 						}
@@ -1126,7 +1135,7 @@ void cdi_read_cd(uint8_t* buffer, int lba, int cnt)
 						}
 						else
 						{
-							
+							// Force zero to avoid accidental CD+G detection in CD player
 							memset(subcode_out.rw, 0, sizeof(subcode_out.rw));
 						}
 
@@ -1155,8 +1164,8 @@ static void mount_cd(int size, int index)
 	user_io_bufferinvalidate(0);
 }
 
-
-
+/// Last used directory for save file management
+/// Must be static to keep the value between mount calls
 static char last_dir[1024] = "";
 
 int cdi_mount_cd(int s_index, const char* filename)
@@ -1181,6 +1190,8 @@ int cdi_mount_cd(int s_index, const char* filename)
 				int old_len = strlen(last_dir);
 				int same_game = old_len && (cur_len == old_len) && !strncmp(last_dir, filename, old_len);
 
+			// Handle multi disc titles and avoid re-mounting the save file
+			// to avoid resets on the core
 				if (!same_game)
 				{
 					strncpy(last_dir, filename, sizeof(last_dir));
@@ -1189,6 +1200,8 @@ int cdi_mount_cd(int s_index, const char* filename)
 						*p = 0;
 					else
 						*last_dir = 0;
+				// FPGA side will be informed about the mount and perform a reset
+				// if configured to do so
 					cdi_mount_save(last_dir);
 				}
 			}

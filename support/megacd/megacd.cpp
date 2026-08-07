@@ -13,7 +13,7 @@
 #include "megacd.h"
 #include "../physical_disc/physical_disc.h"
 
-#define SAVE_IO_INDEX 5 
+#define SAVE_IO_INDEX 5 // fake download to trigger save loading
 
 #define MCD_GET_CMD        0
 #define MCD_GET_SEND_DATA  1
@@ -28,7 +28,7 @@ void mcd_poll()
 	static uint8_t adj = 0;
 	static uint32_t swap_close_at = 0;
 
-	
+
 
 
 	if (cdd.is_phys() && physical_disc_swap_consume() && cdd.SwapPhys())
@@ -48,7 +48,7 @@ void mcd_poll()
 	if (!poll_timer || CheckTimer(poll_timer))
 	{
 		if (!cdd.isData && cdd.status == CD_STAT_PLAY && cdd.latency == 0) {
-			
+			// Send audio sectors faster so buffer stays filled
 			poll_timer = GetTimer(10);
 			adj = 0;
 		} else {
@@ -66,7 +66,7 @@ void mcd_poll()
 
 			has_command = 0;
 
-			
+			//printf("\x1b[32mMCD: Send status, status = %04X%04X%04X, frame = %u\n\x1b[0m", (uint16_t)((s >> 32) & 0x00FF), (uint16_t)((s >> 16) & 0xFFFF), (uint16_t)((s >> 0) & 0xFFFF), frame);
 		}
 
 		cdd.Update();
@@ -98,7 +98,7 @@ void mcd_poll()
 		has_command = 1;
 
 
-		
+		//printf("\x1b[32mMCD: Get command, command = %04X%04X%04X, has_command = %u\n\x1b[0m", data_in[2], data_in[1], data_in[0], has_command);
 	}
 	else
 		DisableIO();
@@ -149,7 +149,7 @@ int mcd_set_image(int num, const char *filename)
 	int audio_only = 0;
 	physical_disc_region_t disc_region = PHYSICAL_DISC_REGION_UNKNOWN;
 
-	
+
 
 
 
@@ -158,7 +158,7 @@ int mcd_set_image(int num, const char *filename)
 		toc_t disc_toc = {};
 		if (!physical_disc_load_toc(&disc_toc)) audio_only = physical_disc_toc_audio_only(&disc_toc);
 		if (!audio_only) disc_region = physical_disc_region();
-		
+
 
 
 		if (!physical_disc_disc_present()) physical_disc_close();
@@ -166,7 +166,7 @@ int mcd_set_image(int num, const char *filename)
 
 	int same_game = *filename && *last_dir && !strncmp(last_dir, filename, strlen(last_dir));
 
-	
+
 
 
 
@@ -188,7 +188,7 @@ int mcd_set_image(int num, const char *filename)
 		loaded = 0;
 		if (phys)
 		{
-			
+
 
 
 
@@ -223,7 +223,7 @@ int mcd_set_image(int num, const char *filename)
 			sprintf(buf, "%s/boot.rom", HomeDir());
 			loaded = user_io_file_tx(buf);
 
-			
+
 
 
 			if (loaded && phys && !audio_only && disc_region != PHYSICAL_DISC_REGION_UNKNOWN)
@@ -267,7 +267,7 @@ int mcd_set_image(int num, const char *filename)
 			{
 				if (phys)
 				{
-					
+
 
 					char save_name[64] = "physical_disc";
 					physical_disc_save_name(PHYSICAL_DISC_DISC_MEGACD, save_name, sizeof(save_name));
@@ -288,8 +288,8 @@ int mcd_set_image(int num, const char *filename)
 		}
 	}
 
-	
-	
+
+
 	return mounted;
 }
 
@@ -298,7 +298,7 @@ void mcd_reset() {
 }
 
 int mcd_send_data(uint8_t* buf, int len, uint8_t index) {
-	
+	// set index byte
 	user_io_set_index(index);
 
 	user_io_set_download(1);
@@ -398,7 +398,7 @@ int mcd_can_send_data(uint8_t type) {
 		return 1;
 	}
 
-	
+	// Ask the FPGA if it is ready to receive a sector
 	spi_uio_cmd_cont(UIO_CD_GET);
 	spi_w(MCD_GET_SEND_DATA | (type << 2));
 

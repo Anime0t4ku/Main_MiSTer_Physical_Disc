@@ -27,9 +27,9 @@ void pcecd_poll()
 	if (CheckTimer(poll_timer))
 	{
 		if ((!pcecdd.latency) && (pcecdd.state == PCECD_STATE_READ)) {
-			poll_timer += 16;				
+			poll_timer += 16; // 16.0ms between frames if reading data */
 		} else {
-			poll_timer += 13 + ((adj == 3) ? 1 : 0);	
+			poll_timer += 13 + ((adj == 3) ? 1 : 0); // 13.33ms otherwise (including latency counts) */
 			if (adj > 3) adj = 3;
 			if (--adj <= 0) adj = 3;
 		}
@@ -74,7 +74,7 @@ void pcecd_poll()
 			break;
 
 		case 1:
-			
+			//TODO: process data
 			pcecdd.SendStatus(0);
 			printf("\x1b[32mPCECD: Command MODESELECT6, received data\n\x1b[0m");
 			break;
@@ -89,7 +89,7 @@ void pcecd_poll()
 		}
 
 
-		
+		//printf("\x1b[32mMCD: Get command, command = %04X%04X%04X, has_command = %u\n\x1b[0m", data_in[2], data_in[1], data_in[0], has_command);
 	}
 	else
 		DisableIO();
@@ -221,7 +221,7 @@ void pcecd_set_image(int num, const char *filename)
 			char save_name[64] = "physical_disc";
 			if (phys) physical_disc_save_name(PHYSICAL_DISC_DISC_PCECD, save_name, sizeof(save_name));
 
-			
+
 			strcpy(buf, filename);
 			char *p = strrchr(buf, '/');
 			int loaded = 0;

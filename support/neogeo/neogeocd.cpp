@@ -31,7 +31,7 @@ void neocd_poll()
 	static uint8_t last_req = 255;
 	static uint32_t swap_close_at = 0;
 
-	
+
 
 
 	if (cdd.is_phys() && physical_disc_swap_consume() && cdd.SwapPhys())
@@ -63,7 +63,7 @@ void neocd_poll()
 
 			has_command = 0;
 
-			
+			//printf("\x1b[32mNEOCD: Send status, status = %04X%04X%04X \n\x1b[0m", (uint16_t)((s >> 32) & 0x00FF), (uint16_t)((s >> 16) & 0xFFFF), (uint16_t)((s >> 0) & 0xFFFF));
 		}
 
 		cdd.Update();
@@ -97,7 +97,7 @@ void neocd_poll()
 		cdd.CommandExec();
 		has_command = 1;
 
-		
+		//printf("\x1b[32mNEOCD: Get command, command = %04X%04X%04X, has_command = %u\n\x1b[0m", data_in[2], data_in[1], data_in[0], has_command);
 	}
 	else
 		DisableIO();
@@ -106,7 +106,7 @@ void neocd_poll()
 void set_poll_timer()
 {
 	int speed = cd_speed;
-	int interval = 10; 
+	int interval = 10; // Slightly faster so the buffers stay filled when playing
 
 	if (!cdd.isData || cdd.status != CD_STAT_PLAY || cdd.latency != 0)
 	{
@@ -140,8 +140,8 @@ int neocd_set_image(const char *filename)
 
 	if (*filename)
 	{
-		
-		
+
+
 		char nm[1024];
 		snprintf(nm, sizeof(nm), "%s", filename);
 		bios_ok = neogeo_romset_tx(nm, 1);
@@ -165,8 +165,8 @@ int neocd_set_image(const char *filename)
 
 	neocd_reset();
 
-	
-	
+
+
 	return bios_ok && cdd.loaded;
 }
 
@@ -175,7 +175,7 @@ void neocd_reset() {
 }
 
 int neocd_send_data(uint8_t* buf, int len, uint8_t index) {
-	
+	// set index byte
 	user_io_set_index(index);
 
 	user_io_set_download(1);
@@ -193,7 +193,7 @@ void neocd_set_en(int enable) {
 }
 
 int neocd_can_send_data(uint8_t type) {
-	
+	// Ask the FPGA if it is ready to receive a sector
 	spi_uio_cmd_cont(UIO_CD_GET);
 	spi_w(NEOCD_GET_SEND_DATA | (type << 2));
 

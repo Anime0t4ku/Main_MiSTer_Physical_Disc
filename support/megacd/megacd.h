@@ -2,7 +2,7 @@
 #define MEGACD_H
 
 
-
+// CDD status
 #define CD_STAT_STOP			0x00
 #define CD_STAT_PLAY			0x01
 #define CD_STAT_SEEK			0x02
@@ -19,13 +19,13 @@
 #define CD_STAT_TRAY			0x0E
 #define CD_STAT_TEST			0x0F
 
-
+// CDD command
 #define CD_COMM_IDLE			0x00
 #define CD_COMM_STOP			0x01
 #define CD_COMM_TOC				0x02
 #define CD_COMM_PLAY			0x03
 #define CD_COMM_SEEK			0x04
-
+//#define CD_COMM_OPEN			0x05
 #define CD_COMM_PAUSE			0x06
 #define CD_COMM_RESUME			0x07
 #define CD_COMM_FW_SCAN			0x08
@@ -94,7 +94,7 @@ private:
 
 #define CD_SCAN_SPEED 30
 
-
+//cdd.cpp
 extern cdd_t cdd;
 
 

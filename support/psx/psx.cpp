@@ -110,10 +110,6 @@ static void unload_chd(toc_t *table)
 	{
 		chd_close(table->chd_f);
 	}
-	
-
-
-
 	if (chd_hunkbuf) free(chd_hunkbuf);
 	chd_hunkbuf = NULL;
 	memset(table, 0, sizeof(toc_t));
@@ -140,13 +136,13 @@ static int load_chd(const char *filename, toc_t *table)
 		return 0;
 	}
 
-	
-
-
+	/* PSX core expects the TOC values for track start/end to not take into account
+	* pregap, unlike some other cores. Adjust the CHD toc to reflect this
+	*/
 
 	for (int i = 0; i < table->last; i++)
 	{
-		if (i == 0) 
+		if (i == 0) //First track fakes a pregap even if it doesn't exist
 		{
 			table->tracks[i].indexes[1] = 150;
 			table->tracks[i].start = 150;
@@ -195,7 +191,7 @@ static int load_cue(const char* filename, toc_t *table)
 		lptr = line;
 		while (*lptr == 0x20) lptr++;
 
-		
+		/* decode FILE commands */
 		if (!(memcmp(lptr, "FILE", 4)))
 		{
 			ptr = fname + strlen(fname) - 1;
@@ -232,15 +228,15 @@ static int load_cue(const char* filename, toc_t *table)
 			}
 		}
 
-		
+		/* decode PREGAP commands */
 		else if (sscanf(lptr, "PREGAP %02d:%02d:%02d", &mm, &ss, &bb) == 3)
 		{
-			
+			// Single bin specific, add pregab but subtract inherent pregap
 			pregap += bb + ss * 75 + mm * 60 * 75;
       table->tracks[table->last].pregap = 1;
 
 		}
-		
+		/* decode TRACK commands */
 		else if ((sscanf(lptr, "TRACK %02d %*s", &bb)) || (sscanf(lptr, "TRACK %d %*s", &bb)))
 		{
       pregap = 0;
@@ -255,7 +251,7 @@ static int load_cue(const char* filename, toc_t *table)
 			{
 				table->tracks[table->last].sector_size = 2352;
 				table->tracks[table->last].type = TT_MODE1;
-				if (!table->last) table->end = 150; 
+				if (!table->last) table->end = 150; // implicit 2 seconds pregap for track 1
 			}
 			else if (strstr(lptr, "AUDIO"))
 			{
@@ -270,11 +266,11 @@ static int load_cue(const char* filename, toc_t *table)
 			}
 		}
 
-		
+		/* decode INDEX commands */
 		else if ((sscanf(lptr, "INDEX 00 %02d:%02d:%02d", &mm, &ss, &bb) == 3) ||
 			(sscanf(lptr, "INDEX 0 %02d:%02d:%02d", &mm, &ss, &bb) == 3))
 		{
-			
+			// Single bin specific
 			if (!table->tracks[table->last].f.opened())
 			{
 
@@ -290,7 +286,7 @@ static int load_cue(const char* filename, toc_t *table)
         table->tracks[table->last].start = bb+ss*75+mm*60*75; 
         if (table->tracks[table->last].pregap)
           table->tracks[table->last].start += pregap;
-        
+        //Subtract the fake 150 sector pregap used for the first data track
         table->tracks[table->last].offset = table->tracks[table->last].start*table->tracks[table->last].sector_size;
         if (table->last)
         {
@@ -324,14 +320,14 @@ static int load_cue(const char* filename, toc_t *table)
 		}
 	}
 
-	
+	/*
+	for (int i = 0; i < table->last; i++)
+	{
+		printf("\x1b[32mPSX: Track = %u, start = %u, end = %u, offset = %d, sector_size=%d, type = %u\n\x1b[0m", i, table->tracks[i].start, table->tracks[i].end, table->tracks[i].offset, table->tracks[i].sector_size, table->tracks[i].type);
+		if (table->tracks[i].indexes[1])
+			printf("\x1b[32mPSX: Track = %u,Index1 = %u seconds\n\x1b[0m", i, table->tracks[i].indexes[1] / 75);
 
-
-
-
-
-
-
+	}*/
 
 	return 1;
 }
@@ -369,14 +365,14 @@ static void apply_disc_bias(toc_t *table)
 
 static int load_phys(toc_t *table)
 {
-	
+
 	if (table->chd_f) unload_chd(table);
 	else if (table->phys) unload_phys(table);
 	else unload_cue(table);
 
 	if (physical_disc_open(NULL) || physical_disc_load_toc(table) || !table->last)
 	{
-		
+
 
 
 		physical_disc_close();
@@ -422,7 +418,7 @@ struct disk_t
 	uint32_t total_lba;
 	uint32_t total_bcd;
 	uint16_t libcrypt_mask;
-	uint16_t metadata; 
+	uint16_t metadata; // lower 2 bits encode the region, 3rd bit is reset request, the other bits are reseved
 	track_t  track[99];
 };
 
@@ -460,8 +456,8 @@ static void send_cue_and_metadata(toc_t *table, uint16_t libcrypt_mask, enum reg
 
 		memset(disk, 0, sizeof(disk_t));
 		disk->libcrypt_mask = libcrypt_mask;
-		disk->metadata = region; 
-		if (reset) disk->metadata |= 4; 
+		disk->metadata = region; // the lower 2 bits of metadata contain the region
+		if (reset) disk->metadata |= 4; // 3rd bit is reset request
 		disk->track_count = (BCD(table->last) << 8) | table->last;
 		disk->total_lba = table->end;
 		int m = (disk->total_lba / 75) / 60;
@@ -539,7 +535,7 @@ int psx_chd_hunksize()
 
 void psx_read_cd(uint8_t *buffer, int lba, int cnt)
 {
-	
+	//printf("req lba=%d, cnt=%d\n", lba, cnt);
 
 	while (cnt > 0)
 	{
@@ -556,7 +552,7 @@ void psx_read_cd(uint8_t *buffer, int lba, int cnt)
 				{
 					if (toc.phys)
 					{
-						
+
 
 						physical_disc_seek_hint(lba - toc.tracks[0].indexes[1]);
 					}
@@ -574,20 +570,20 @@ void psx_read_cd(uint8_t *buffer, int lba, int cnt)
 					{
             if (toc.tracks[i+1].pregap && lba > (toc.tracks[i+1].start-toc.tracks[i+1].indexes[1]))
             {
-              
-              
-              
-              
-              
-              
+              //The TOC is setup so that pregap sectors are actually part of the
+              //PREVIOUS track. If the pregap field is set the file doesn't contain
+              //this data, so we have to fake it. 
+              //Check the next track's pregap and indexes[1] values to determine
+              //if we're reading pregap sectors
+
 
               memset(buffer, 0x0, CD_SECTOR_LEN);
             }
             else if (toc.phys)
 						{
-							
-							
-							
+
+
+
 							int read_lba = lba - toc.tracks[0].indexes[1];
 							if (physical_disc_read_sector(read_lba, buffer, NULL))
 								memset(buffer, 0, CD_SECTOR_LEN);
@@ -595,11 +591,11 @@ void psx_read_cd(uint8_t *buffer, int lba, int cnt)
             else if (toc.chd_f)
 						{
 
-							
+							// The "fake" 150 sector pregap moves all the LBAs up by 150, so adjust here to read where the core actually wants data from
 							int read_lba = lba - toc.tracks[0].indexes[1];
 							if (mister_chd_read_sector(toc.chd_f, (read_lba + toc.tracks[i].offset), 0, 0, CD_SECTOR_LEN, buffer, chd_hunkbuf, &chd_hunknum) == CHDERR_NONE)
 							{
-								if (!toc.tracks[i].type) 
+								if (!toc.tracks[i].type) //CHD requires byteswap of audio data
 								{
 									for (int swapidx = 0; swapidx < CD_SECTOR_LEN; swapidx += 2)
 									{
@@ -654,7 +650,7 @@ const region_info_t region_info_table[]
 	{ "SCPS", region_t::JP },
 	{ "SLPS", region_t::JP },
 	{ "SIPS", region_t::JP },
-	
+	// for demo disks
 	{ "PUPX", region_t::US },
 	{ "PEPX", region_t::EU },
 	{ "PAPX", region_t::JP },
@@ -700,7 +696,7 @@ static game_info_t psx_get_game_info()
 	for (int sector = ROOT_FOLDER_LBA; sector < ROOT_FOLDER_LBA + 25; ++sector)
 	{
 		psx_read_cd(buffer, sector, 1);
-		
+		//hexdump(buffer, CD_SECTOR_LEN);
 		char* start = nullptr;
 
 		for (const auto& region_info : region_info_table)
@@ -719,7 +715,7 @@ static game_info_t psx_get_game_info()
 
 		size_t size = end - start;
 
-		
+		// file is usually in CCCC_DDD.DD format, normalize to CCCC-DDDDD
 		if (size == 11)
 		{
 			if (start[4] == '_') start[4] = '-';
@@ -790,7 +786,7 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 			}
 			if (phys) s_swap_region = region;   
 
-			
+
 
 
 
@@ -807,7 +803,7 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 			}
 			const char *name = phys ? disc_name : filename;
 
-			
+
 			if (!audio_only && game_id && game_id[0] != '\0')
 			{
 				user_io_write_gameid(name, 0, game_id);
@@ -823,7 +819,7 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 
 				int same_game = old_len && (cur_len == old_len) && !strncmp(last_dir, name, old_len);
 
-				
+
 
 
 				if (phys) same_game = 0;
@@ -846,7 +842,7 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 					{
 						int bios_loaded = 0;
 
-						
+						// load cd_bios.rom from game directory
 						sprintf(buf, "%s/", last_dir);
 						p = strrchr(buf, '/');
 						if (p)
@@ -855,7 +851,7 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 							bios_loaded = load_bios(buf);
 						}
 
-						
+						// load cd_bios.rom from parent directory
 						if (!bios_loaded) {
 							strcpy(buf, last_dir);
 							p = strrchr(buf, '/');
@@ -868,7 +864,7 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 
 					}
 
-					
+
 
 
 					if (!(user_io_status_get("[63]"))) psx_mount_save(phys ? name : last_dir);
@@ -881,11 +877,13 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 			{
 				fileTYPE sbi_file = {};
 				bool has_sbi_file = false;
+			// search for .sbi file in PSX/sbi.zip
 				sprintf(buf, "%s/sbi.zip/%s.sbi", HomeDir(), game_id);
 				has_sbi_file = FileOpen(&sbi_file, buf, 1);
 
 				if (!has_sbi_file && !phys)
 				{
+				// search for .sbi file base on image name
 					strcpy(buf, filename);
 					strcpy((name_len > 4) ? buf + name_len - 4 : buf + name_len, ".sbi");
 					has_sbi_file = FileOpen(&sbi_file, buf, 1);
@@ -906,7 +904,7 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 			mount_cd(toc.end*CD_SECTOR_LEN, s_index);
 			loaded = 1;
 
-			
+
 			if (phys) physical_disc_swap_enable(1);
 		}
 	}
@@ -921,7 +919,7 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 		mount_cd(0, s_index);
 	}
 
-	
+
 	return loaded;
 }
 
@@ -938,13 +936,13 @@ static void psx_swap_apply()
 	apply_disc_bias(&nt);
 	toc = nt;   
 
-	
-	
+
+
 	region_t region = s_swap_region;
 
-	
-	
-	
+
+
+
 	printf("PSX: disc swap -> region %s\n", region_string(region));
 	send_cue_and_metadata(&toc, 0, region, 0);
 	user_io_set_index(s_swap_fidx);

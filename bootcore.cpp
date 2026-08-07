@@ -2,6 +2,10 @@
 
 
 
+// bootcore.cpp
+// 2024, Aitor Gomez Garcia (info@aitorgomez.net)
+// Thanks to Sorgelig and BBond007 for their help and advice in the development of this feature.
+
 #include "file_io.h"
 #include "cfg.h"
 #include "fpga_io.h"
@@ -117,17 +121,17 @@ char* loadLastcore()
 
 }
 
-
-
-
-
-
-
-
-
-
-
-
+// Tests whether a filename is a dated release of a given core name.
+//
+// Parameters:
+//   A - Generic core name (without date or extension), e.g. "NES"
+//   B - Filename to test, e.g. "NES_20240115.rbf"
+//
+// Returns:
+//   true if and only if B exactly matches the pattern
+//     "<A>_YYYYMMDD.rbf"
+//   where YYYYMMDD consists of 8 decimal digits.
+//   Returns false otherwise, including on NULL inputs.
 bool matchesCore_yyyyMMdd_rbf(const char *A, const char *B)
 {
 
@@ -140,23 +144,23 @@ bool matchesCore_yyyyMMdd_rbf(const char *A, const char *B)
 	size_t b_len = strlen(B);
 	size_t ext_len = strlen(ext);
 
-	
+	// A + '_' + 8 digits + ".rbf"
 	if (b_len != a_len + 1 + 8 + ext_len)
 		return false;
 
-	
+	// Exact A prefix
 	if (strncmp(B, A, a_len) != 0)
 		return false;
 
-	
+	// Underscore
 	if (B[a_len] != '_')
 		return false;
 
-	
+	// Extension
 	if (strcmp(B + b_len - ext_len, ext) != 0)
 		return false;
 
-	
+	// 8 digits YYYYMMDD
 	const char *digits = B + a_len + 1;
 	for (int i = 0; i < 8; i++)
 	{
@@ -227,7 +231,7 @@ static CoreMatch findCore(const char *name, const char *coreName)
 		}
 		else
 		{
-			
+			// Exact filename match (any extension)
 			if (!strcmp(coreName, entry->d_name))
 			{
 				CoreMatch exact;
@@ -238,7 +242,7 @@ static CoreMatch findCore(const char *name, const char *coreName)
 				break;
 			}
 
-			
+			// Dated generic match: <core>_YYYYMMDD.rbf
 			if (matchesCore_yyyyMMdd_rbf(coreName, entry->d_name))
 			{
 				CoreMatch dated;

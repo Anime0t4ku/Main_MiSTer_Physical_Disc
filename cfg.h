@@ -2,12 +2,16 @@
 
 
 
+// cfg.h
+// 2015, rok.krajnc@gmail.com
+// 2017+, Sorgelig
+
 #ifndef __CFG_H__
 #define __CFG_H__
 
 #include <inttypes.h>
 
-
+//// type definitions ////
 typedef struct {
 	uint32_t keyrah_mode;
 	uint8_t forced_scandoubler;
@@ -121,7 +125,7 @@ typedef struct {
 
 extern cfg_t cfg;
 
-
+//// functions ////
 void cfg_parse();
 void cfg_print();
 const char* cfg_get_name(uint8_t alt);
@@ -139,4 +143,4 @@ struct yc_mode
 
 void yc_parse(yc_mode *yc_table, int max);
 
-#endif 
+#endif // __CFG_H__

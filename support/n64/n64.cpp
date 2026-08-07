@@ -361,7 +361,7 @@ static void cpak_format(uint8_t* data) {
 	read(rndfd, &seed, sizeof(seed));
 	close(rndfd);
 	srand(seed);
-	
+
 	memset(data, 0, get_save_size(MemoryType::CPAK));
 	uint8_t id_template[CPAK_ID_ENTRY_SIZE];
 	memset(id_template, 0, CPAK_ID_ENTRY_SIZE);
@@ -1627,7 +1627,6 @@ int n64_rom_tx(const char* name, const unsigned char idx, const uint32_t load_ad
 
 				// Hold reset
 				user_io_status_set(RESET_OPT, 1);
-
 				should_reset = true;
 			}
 		}
