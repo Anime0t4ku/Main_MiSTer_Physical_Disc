@@ -175,6 +175,16 @@ Physical Disc Support supports games that use CD audio, including mixed-mode dis
 
 Because the audio is being read from a real optical drive rather than a disc image, compatibility and timing can vary between drives and games.
 
+## Burning SNES MSU-1 & Mega Drive / Genesis MD+ CDs
+
+For users who want to create physical discs for **SNES MSU-1** or **Mega Drive / Genesis MD+**, a dedicated burning tutorial is included with the project.
+
+The tutorial was written by **NinoPrime** and covers the process of preparing and burning compatible discs for use with Physical Disc Support.
+
+> **Note:** The tutorial currently covers the process on **Windows only**.
+
+[Burning MSU-1 & MD+ CDs](assets/Burning%20MSU-1%20%26%20MD%2B%20CD%27s.docx)
+
 ## Updating
 
 Physical Disc Support can be updated through:
@@ -211,6 +221,8 @@ When reporting an issue, please include:
 - Whether the problem affects loading, CD audio, disc detection, or disc swapping
 
 ## Credits
+
+- **NinoPrime** — author of the SNES MSU-1 & Mega Drive / Genesis MD+ CD burning tutorial
 
 This project builds on MiSTer Main, the supported MiSTer cores, and the work of the MiSTer FPGA community.
 
