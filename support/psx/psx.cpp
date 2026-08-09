@@ -379,7 +379,6 @@ static int load_phys(toc_t *table)
 		return 0;
 	}
 
-	physical_disc_psx_enrich_toc(table);
 	apply_disc_bias(table);
 	return 1;
 }
@@ -784,7 +783,7 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 				if (region == region_t::UNKNOWN) region = game_info.region;
 				printf("Game ID: %s, region: %s\n", game_id, region_string(region));
 			}
-			if (phys) s_swap_region = region;   
+			if (phys) s_swap_region = region;
 
 
 
@@ -932,7 +931,6 @@ static void psx_swap_apply()
 {
 	toc_t nt = {};
 	if (physical_disc_current_toc(&nt) || !nt.last) return;
-	physical_disc_psx_enrich_toc(&nt);
 	apply_disc_bias(&nt);
 	toc = nt;   
 

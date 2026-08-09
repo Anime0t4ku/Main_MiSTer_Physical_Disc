@@ -25,6 +25,8 @@
 #define IO_BURST            16
 #define AUDIO_SYNC_BURST    4
 #define WARMUP_SECTORS      768
+#define NEIGHBOR_PREWARM_SECTORS 128
+#define NEIGHBOR_ENTRY_SPAN 32
 #define STATS_PERIOD_MS     5000
 #define SWAP_POLL_MS        500
 #define SYNC_IO_BURST       8
@@ -88,11 +90,13 @@ typedef struct {
 	volatile int want_native_speed;
 	volatile int rush_lane;
 	volatile int rush_lba;
+	volatile int neighbor_lba;
+	volatile int neighbor_end;
 } drive_state_t;
 
 static drive_state_t drv = { -1, 0, -1, -1, {}, 0, NULL, {0,0}, {0,0}, 0, 0, 0,
 	  PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
-	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, -1, -1, 0, 0, 0, -1, -1 };
+	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, -1, -1, 0, 0, 0, -1, -1, -1, 0 };
 
 #define SWAP_MARKER_PATH "/tmp/physical_disc_swapped"
 
@@ -209,6 +213,7 @@ static int scsi_read_cd(int lba, int count, uint8_t flags, int with_sub, uint8_t
 	int sector_len = PHYSICAL_DISC_RAW + (with_sub ? PHYSICAL_DISC_SUB : 0);
 
 	cdb[0] = 0xBE;
+	if (flags == 0x10) cdb[1] = 0x04;
 	cdb[2] = (lba >> 24) & 0xFF;
 	cdb[3] = (lba >> 16) & 0xFF;
 	cdb[4] = (lba >> 8) & 0xFF;
@@ -288,7 +293,7 @@ static int refill_ring(int lba, int count, int sync)
 		}
 	}
 
-	if (r && sync && !audio) {
+	if (r && sync) {
 		double dt = clock_ms() - io0;
 		if (dt > drv.worst_io_ms) drv.worst_io_ms = dt;
 		return -1;
@@ -299,11 +304,9 @@ static int refill_ring(int lba, int count, int sync)
 			uint8_t one[ENTRY_SIZE];
 			int rr = -1;
 
-			int tries = audio ? 1 : 3;
-			int one_timeout = audio ? AUDIO_SYNC_WAIT_MS : BG_IO_TIMEOUT_MS;
-			for (int n = 0; n < tries && rr; n++) {
+			for (int n = 0; n < 3 && rr; n++) {
 				pthread_mutex_lock(&drv.io_lock);
-				rr = scsi_read_cd(lba + i, 1, flags, 0, one, one_timeout);
+				rr = scsi_read_cd(lba + i, 1, flags, 0, one, BG_IO_TIMEOUT_MS);
 				pthread_mutex_unlock(&drv.io_lock);
 			}
 			if (rr) {
@@ -426,6 +429,7 @@ static void *ring_worker_main(void *arg)
 	while (drv.alive) {
 		int target = -1;
 		int rushed = 0;
+		int neighbor_fill = 0;
 
 		if (drv.watching) {
 			if (clock_ms() - last_watch >= 2000) {
@@ -595,6 +599,15 @@ static void *ring_worker_main(void *arg)
 			else drv.fail_streak = 0;
 		}
 
+		if (target < 0 && drv.neighbor_lba >= 0) {
+			if (drv.neighbor_lba >= drv.neighbor_end || drv.leadout_lba <= 0) {
+				drv.neighbor_lba = -1;
+			} else {
+				target = drv.neighbor_lba;
+				neighbor_fill = 1;
+			}
+		}
+
 		if (target < 0) {
 			int lw = drv.active_lane;
 			int klba = (lw >= 0) ? drv.lane_cursor[lw] : (drv.leadout_lba > 0 ? drv.lane_cursor[0] : -1);
@@ -619,6 +632,7 @@ static void *ring_worker_main(void *arg)
 			drv.rush_lba = -1;
 			drv.rush_lane = -1;
 		}
+		if (neighbor_fill) drv.neighbor_lba += IO_BURST;
 		last_io = clock_ms();
 	}
 	return NULL;
@@ -810,9 +824,7 @@ static int physical_disc_q_index00(int lba, int track)
 
 	uint8_t raw[PHYSICAL_DISC_SUB];
 	uint8_t q[12];
-	pthread_mutex_lock(&drv.io_lock);
 	int r = scsi_read_raw_subq(lba, raw);
-	pthread_mutex_unlock(&drv.io_lock);
 	if (r) return -1;
 
 	raw_subq_decode(raw, q);
@@ -834,6 +846,8 @@ int physical_disc_psx_enrich_toc(toc_t *toc)
 
 	int found = 0;
 	int q_supported = 0;
+
+	pthread_mutex_lock(&drv.io_lock);
 
 	for (int i = 1; i < toc->last; i++) {
 		int index1 = toc->tracks[i].start;
@@ -878,6 +892,7 @@ int physical_disc_psx_enrich_toc(toc_t *toc)
 		if (lo >= index1 || physical_disc_q_index00(lo, track) != 1) continue;
 
 		int pregap = index1 - lo;
+		if (pregap <= 0 || pregap > 300 || lo <= toc->tracks[i - 1].start) continue;
 		toc->tracks[i].start = lo;
 		toc->tracks[i].indexes[1] = pregap;
 		toc->tracks[i - 1].end = lo;
@@ -887,6 +902,8 @@ int physical_disc_psx_enrich_toc(toc_t *toc)
 		printf("DISC: PSX track %02d INDEX 00 at LBA %d, INDEX 01 at %d (%d sectors)\n",
 			track, lo, index1, pregap);
 	}
+
+	pthread_mutex_unlock(&drv.io_lock);
 
 	if (found && drv.ring) {
 		pthread_mutex_lock(&drv.ring_lock);
@@ -970,6 +987,8 @@ int physical_disc_load_toc(toc_t *toc)
 	drv.active_lane = -1;
 	drv.rush_lane = -1;
 	drv.rush_lba = -1;
+	drv.neighbor_lba = -1;
+	drv.neighbor_end = 0;
 	drv.hit_count = drv.miss_count = drv.bad_count = drv.bad_logged = 0;
 	drv.worst_wait_ms = drv.worst_io_ms = 0.0;
 
@@ -1072,6 +1091,23 @@ void physical_disc_seek_hint(int lba)
 	drv.active_lane = w;
 	drv.rush_lane = w;
 	drv.rush_lba = lba;
+
+	int t = span_index(lba);
+	if (t >= 0 && drv.span[t].is_audio && (lba - drv.span[t].lo) < NEIGHBOR_ENTRY_SPAN) {
+		int nt = t + 1;
+		if (nt >= drv.track_count || !drv.span[nt].is_audio) {
+			nt = -1;
+			for (int i = 0; i < drv.track_count; i++) {
+				if (drv.span[i].is_audio) { nt = i; break; }
+			}
+		}
+		if (nt >= 0 && nt != t) {
+			drv.neighbor_lba = drv.span[nt].lo;
+			int end = drv.span[nt].lo + NEIGHBOR_PREWARM_SECTORS;
+			if (end > drv.span[nt].hi) end = drv.span[nt].hi;
+			drv.neighbor_end = end;
+		}
+	}
 }
 
 static int fetch_sector(int lba, uint8_t *dst, uint8_t *sub96, int *sub_valid, int mark_active)
