@@ -379,6 +379,13 @@ static int load_phys(toc_t *table)
 		return 0;
 	}
 
+	// Enrich the basic drive TOC with real INDEX 00/pregap information when
+	// the drive can return raw Q subchannel data. This must happen before the
+	// PSX-specific 150-sector bias is applied so track starts/indexes describe
+	// the physical disc accurately. Drives without usable sub-Q simply keep the
+	// basic TOC and retain the existing fallback behaviour.
+	physical_disc_psx_enrich_toc(table);
+
 	apply_disc_bias(table);
 	return 1;
 }
@@ -931,6 +938,10 @@ static void psx_swap_apply()
 {
 	toc_t nt = {};
 	if (physical_disc_current_toc(&nt) || !nt.last) return;
+	// Re-run PSX pregap enrichment for the newly inserted physical disc before
+	// applying the PSX LBA bias. physical_disc_current_toc() intentionally
+	// returns the generic drive TOC, so INDEX 00 data has to be restored here.
+	physical_disc_psx_enrich_toc(&nt);
 	apply_disc_bias(&nt);
 	toc = nt;   
 
