@@ -88,6 +88,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "support.h"
 #include "support/physical_disc/physical_disc_launch.h"
 #include "support/megadrive/mdplus.h"
+#include "support/snes/snes.h"
 #include "bootcore.h"
 #include "ide.h"
 #include "profiling.h"
@@ -1258,7 +1259,7 @@ void HandleUI(void)
 		OsdDisable();
 	}
 
-	if (mdplus_cd_suppress_osd())
+	if (mdplus_cd_suppress_osd() || snes_cd_suppress_osd())
 	{
 		c = 0;
 		menustate = MENU_NONE1;

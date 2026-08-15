@@ -366,6 +366,19 @@ int physical_disc_launch_consume_startup_osd_suppression(void)
 int physical_disc_launch_menu_tick(void)
 {
 	if (!is_menu()) return 0;
+
+	// Auto Disc Discovery is optional. When disabled, do not touch the
+	// optical drive from the menu at all. This is particularly important
+	// after cartridge-style physical-disc cores (MD+/MSU-1), where a user
+	// may want to eject or swap the disc manually after returning to menu.
+	if (!cfg.physical_disc_launch)
+	{
+		physical_disc_launch_cancel();
+		physical_disc_close();
+		menu_detecting = 0;
+		menu_poll_at = 0;
+		return 0;
+	}
 	if (menu_poll_at && !CheckTimer(menu_poll_at)) return 0;
 	menu_poll_at = GetTimer(1000);
 	menu_detecting = 1;

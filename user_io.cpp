@@ -1383,6 +1383,13 @@ void user_io_init(const char *path, const char *xml)
 {
 	char *name;
 	static char mainpath[512];
+
+	// Physical-disc cartridge-style cores can be reloaded directly into the
+	// same core name. Their normal poll-based cleanup therefore never sees an
+	// inactive core. Tear them down before every new core initialization.
+	snes_cd_session_reset();
+	mdplus_cd_session_reset();
+
 	core_name[0] = 0;
 	disable_osd = 0;
 

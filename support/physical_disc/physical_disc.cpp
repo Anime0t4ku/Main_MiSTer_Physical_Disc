@@ -25,6 +25,9 @@
 #define IO_BURST            16
 #define AUDIO_SYNC_BURST    4
 #define WARMUP_SECTORS      768
+#define STARTUP_PRIME_SECTORS 32
+#define INDEX00_ENTRY_PROBES 4
+#define MAX_PREGAP_SECTORS   750
 #define NEIGHBOR_PREWARM_SECTORS 128
 #define NEIGHBOR_ENTRY_SPAN 32
 #define STATS_PERIOD_MS     5000
@@ -818,6 +821,23 @@ static int bcd_value(uint8_t v)
 	return hi * 10 + lo;
 }
 
+static uint16_t subq_crc16(const uint8_t *q)
+{
+	uint16_t crc = 0;
+	for (int i = 0; i < 10; i++) {
+		crc ^= (uint16_t)q[i] << 8;
+		for (int b = 0; b < 8; b++)
+			crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021) : (uint16_t)(crc << 1);
+	}
+	return (uint16_t)~crc;
+}
+
+static int subq_crc_valid(const uint8_t *q)
+{
+	uint16_t expected = ((uint16_t)q[10] << 8) | q[11];
+	return subq_crc16(q) == expected;
+}
+
 static int physical_disc_q_index00(int lba, int track)
 {
 	if (lba < 0 || drv.dev_fd < 0) return 0;
@@ -828,6 +848,7 @@ static int physical_disc_q_index00(int lba, int track)
 	if (r) return -1;
 
 	raw_subq_decode(raw, q);
+	if (!subq_crc_valid(q)) return 0;
 	if ((q[0] & 0x0F) != 1) return 0;
 
 	int am = bcd_value(q[7]);
@@ -852,17 +873,22 @@ int physical_disc_psx_enrich_toc(toc_t *toc)
 	for (int i = 1; i < toc->last; i++) {
 		int index1 = toc->tracks[i].start;
 		int track = i + 1;
-		int state = physical_disc_q_index00(index1 - 1, track);
+		int state = 0;
+		int last_inside = -1;
+		for (int back = 1; back <= INDEX00_ENTRY_PROBES && index1 - back >= 0; back++) {
+			state = physical_disc_q_index00(index1 - back, track);
+			if (state < 0) break;
+			q_supported = 1;
+			if (state == 1) { last_inside = index1 - back; break; }
+		}
 		if (state < 0) {
 			if (!q_supported && !found)
 				printf("DISC: PSX pregap scan unavailable on this drive, using basic TOC\n");
 			break;
 		}
-		q_supported = 1;
-		if (!state) continue;
+		if (last_inside < 0) continue;
 
 		int lower = toc->tracks[i - 1].start;
-		int last_inside = index1 - 1;
 		int first_outside = lower - 1;
 		int distance = 2;
 
@@ -892,7 +918,7 @@ int physical_disc_psx_enrich_toc(toc_t *toc)
 		if (lo >= index1 || physical_disc_q_index00(lo, track) != 1) continue;
 
 		int pregap = index1 - lo;
-		if (pregap <= 0 || pregap > 300 || lo <= toc->tracks[i - 1].start) continue;
+		if (pregap <= 0 || pregap > MAX_PREGAP_SECTORS || lo <= toc->tracks[i - 1].start) continue;
 		toc->tracks[i].start = lo;
 		toc->tracks[i].indexes[1] = pregap;
 		toc->tracks[i - 1].end = lo;
@@ -996,6 +1022,13 @@ int physical_disc_load_toc(toc_t *toc)
 
 	drv.warmup_lba = -1;
 	if (!drv.mid_swap && drv.track_count) {
+		int prime = STARTUP_PRIME_SECTORS;
+		int available = drv.span[0].hi - toc->tracks[0].start;
+		if (prime > available) prime = available;
+		if (prime > 0) {
+			int pr = refill_ring(toc->tracks[0].start, prime, 1);
+			printf("DISC: startup prime %s (%d sectors)\n", pr ? "incomplete" : "ready", prime);
+		}
 		int pw_end = toc->tracks[0].start + WARMUP_SECTORS;
 		if (pw_end > drv.span[0].hi) pw_end = drv.span[0].hi;
 		if (pw_end > drv.leadout_lba) pw_end = drv.leadout_lba;
@@ -1127,7 +1160,8 @@ static int fetch_sector(int lba, uint8_t *dst, uint8_t *sub96, int *sub_valid, i
 	pthread_mutex_lock(&drv.ring_lock);
 	cache_entry_t *e = entry_for(lba);
 	int hit = (e->lba == lba);
-	if (hit) {
+	int unreadable = hit && e->unreadable;
+	if (hit && !unreadable) {
 		memcpy(dst, e->data, PHYSICAL_DISC_RAW);
 		if (sub96) memcpy(sub96, e->data + PHYSICAL_DISC_RAW, PHYSICAL_DISC_SUB);
 		if (sub_valid) *sub_valid = e->sub_present;
@@ -1137,6 +1171,11 @@ static int fetch_sector(int lba, uint8_t *dst, uint8_t *sub96, int *sub_valid, i
 	if (hit) {
 		if (lba >= drv.lane_cursor[w]) drv.lane_cursor[w] = lba + 1;
 		drv.hit_count++;
+		if (unreadable) {
+			memset(dst, 0, PHYSICAL_DISC_RAW);
+			if (sub96) memset(sub96, 0, PHYSICAL_DISC_SUB);
+			return -1;
+		}
 		return 0;
 	}
 
@@ -1154,7 +1193,8 @@ static int fetch_sector(int lba, uint8_t *dst, uint8_t *sub96, int *sub_valid, i
 		pthread_mutex_lock(&drv.ring_lock);
 		e = entry_for(lba);
 		hit = (e->lba == lba);
-		if (hit) {
+		unreadable = hit && e->unreadable;
+		if (hit && !unreadable) {
 			memcpy(dst, e->data, PHYSICAL_DISC_RAW);
 			if (sub96) memcpy(sub96, e->data + PHYSICAL_DISC_RAW, PHYSICAL_DISC_SUB);
 			if (sub_valid) *sub_valid = e->sub_present;
@@ -1163,6 +1203,11 @@ static int fetch_sector(int lba, uint8_t *dst, uint8_t *sub96, int *sub_valid, i
 
 		if (hit) {
 			drv.lane_cursor[w] = lba + 1;
+			if (unreadable) {
+				memset(dst, 0, PHYSICAL_DISC_RAW);
+				if (sub96) memset(sub96, 0, PHYSICAL_DISC_SUB);
+				return -1;
+			}
 			return 0;
 		}
 	}
@@ -1171,7 +1216,7 @@ static int fetch_sector(int lba, uint8_t *dst, uint8_t *sub96, int *sub_valid, i
 	if (sub96) memset(sub96, 0, PHYSICAL_DISC_SUB);
 	drv.bad_count++;
 	drv.lane_cursor[w] = lba;
-	return 0;
+	return -1;
 }
 
 int physical_disc_read_sector(int lba, uint8_t *dst, uint8_t *sub96)
@@ -1639,11 +1684,27 @@ void physical_disc_close()
 	pthread_join(drv.io_thread, NULL);
 	free(drv.ring);
 	drv.ring = NULL;
+
+	// A Linux optical-device open or a previous filesystem mount may have
+	// asserted the kernel tray lock. Every completed physical-disc session
+	// must leave the drive ejectable. Ignore ENOTTY/unsupported bridges.
+	ioctl(drv.dev_fd, CDROM_LOCKDOOR, 0);
 	close(drv.dev_fd);
 	drv.dev_fd = -1;
 	drv.leadout_lba = 0;
 	drv.track_count = 0;
 	drv.data_lba0 = -1;
 	drv.want_native_speed = 0;
+	drv.subch_ok = -1;
+	drv.sync_busy = 0;
+	drv.fail_streak = 0;
+	drv.active_lane = -1;
+	drv.warmup_lba = -1;
+	drv.warmup_end = 0;
+	drv.rush_lane = -1;
+	drv.rush_lba = -1;
+	drv.neighbor_lba = -1;
+	drv.neighbor_end = 0;
+	for (int w = 0; w < LANE_COUNT; w++) { drv.lane_cursor[w] = 0; drv.lane_active[w] = 0; }
 	active_dev[0] = 0;
 }

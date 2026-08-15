@@ -4,6 +4,7 @@
 void mdplus_init(const char *rom_path);
 void mdplus_poll();
 void mdplus_cd_session_poll();
+void mdplus_cd_session_reset();
 int mdplus_cd_suppress_osd();
 
 #endif

@@ -13,9 +13,11 @@
 #include <dirent.h>
 #include <limits.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <sys/mount.h>
 #include <sys/ioctl.h>
+#include <sys/wait.h>
 #include <linux/cdrom.h>
 
 #include "../../user_io.h"
@@ -181,8 +183,19 @@ static int open_wav(int track)
 		mdp.wav_fp = NULL;
 	}
 
-	mdp.wav_fp = fopen(mdp.tracks[track].wav_path, "rb");
-	if (!mdp.wav_fp) return 0;
+	// The physical-disc MD+ WAV lives on a temporary ISO9660 mount. Main
+	// restarts itself with exec when changing cores, so the audio descriptor must
+	// never survive into the next Main instance or it can keep the old optical
+	// filesystem alive and interfere with the next disc mount.
+	int wav_fd = open(mdp.tracks[track].wav_path, O_RDONLY | O_CLOEXEC);
+	if (wav_fd < 0) return 0;
+
+	mdp.wav_fp = fdopen(wav_fd, "rb");
+	if (!mdp.wav_fp)
+	{
+		close(wav_fd);
+		return 0;
+	}
 
 	fseek(mdp.wav_fp, 0, SEEK_END);
 	uint32_t file_size = ftell(mdp.wav_fp);
@@ -227,8 +240,99 @@ static void close_wav()
 
 static int cd_mdplus_state = 0;
 static unsigned long cd_mdplus_osd_suppress_until = 0;
+static unsigned long cd_mdplus_retry_until = 0;
 static int cd_mdplus_drive = -1;
-static const char cd_mdplus_mount_path[] = "/tmp/cd-mdplus";
+static char cd_mdplus_mount_path[PATH_MAX] = "/tmp/cd-mdplus";
+static unsigned int cd_mdplus_session_id = 0;
+static pid_t cd_mdplus_cleanup_pid = -1;
+static int cd_mdplus_cleanup_fd = -1;
+
+// Main restarts itself with _exit() when changing cores. That bypasses normal
+// C/C++ cleanup, while an ISO9660 mount is global kernel state and survives the
+// process. Keep a tiny MD+-local watchdog alive for the lifetime of the mounted
+// disc. If the Main process disappears without calling cd_mdplus_close_disc(),
+// the pipe reaches EOF and the helper releases the MD+ mount/tray.
+static void cd_mdplus_orphan_cleanup(const char *device, const char *mount_path)
+{
+	for (int retry = 0; retry < 20; retry++)
+	{
+		if (!umount(mount_path) || errno == EINVAL || errno == ENOENT) break;
+		if (errno != EBUSY) break;
+		usleep(10000);
+	}
+	umount2(mount_path, MNT_DETACH);
+	rmdir(mount_path);
+
+	int fd = open(device, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+	if (fd >= 0)
+	{
+		ioctl(fd, CDROM_LOCKDOOR, 0);
+		ioctl(fd, CDROM_SELECT_SPEED, 4);
+		close(fd);
+	}
+}
+
+static void cd_mdplus_cleanup_watch_stop(void)
+{
+	if (cd_mdplus_cleanup_fd >= 0)
+	{
+		// A byte means this is an orderly MD+ teardown; the parent performs
+		// the unmount/unlock itself. EOF means Main vanished via _exit/crash.
+		uint8_t orderly = 1;
+		(void)write(cd_mdplus_cleanup_fd, &orderly, sizeof(orderly));
+		close(cd_mdplus_cleanup_fd);
+		cd_mdplus_cleanup_fd = -1;
+	}
+	if (cd_mdplus_cleanup_pid > 0)
+	{
+		(void)waitpid(cd_mdplus_cleanup_pid, NULL, 0);
+		cd_mdplus_cleanup_pid = -1;
+	}
+}
+
+static int cd_mdplus_cleanup_watch_start(const char *device)
+{
+	cd_mdplus_cleanup_watch_stop();
+
+	// Each session gets its own mount path. The previous Main instance may
+	// still have an orphan-cleanup helper running when a new MD+ game starts;
+	// a private path prevents that old helper from ever unmounting this session.
+	char watched_mount[PATH_MAX];
+	strncpy(watched_mount, cd_mdplus_mount_path, sizeof(watched_mount) - 1);
+	watched_mount[sizeof(watched_mount) - 1] = 0;
+
+	int pipefd[2];
+	if (pipe2(pipefd, O_CLOEXEC)) return 0;
+
+	pid_t pid = fork();
+	if (pid < 0)
+	{
+		close(pipefd[0]);
+		close(pipefd[1]);
+		return 0;
+	}
+
+	if (!pid)
+	{
+		close(pipefd[1]);
+		// Do not let the helper itself keep the optical device open.
+		if (cd_mdplus_drive >= 0) close(cd_mdplus_drive);
+
+		uint8_t orderly = 0;
+		ssize_t got;
+		do got = read(pipefd[0], &orderly, sizeof(orderly));
+		while (got < 0 && errno == EINTR);
+		close(pipefd[0]);
+
+		if (got == 0) cd_mdplus_orphan_cleanup(device, watched_mount);
+		_exit(0);
+	}
+
+	close(pipefd[0]);
+	cd_mdplus_cleanup_pid = pid;
+	cd_mdplus_cleanup_fd = pipefd[1];
+	return 1;
+}
 
 static int cd_mdplus_active()
 {
@@ -276,8 +380,12 @@ static int cd_mdplus_find_rom(char *path, size_t size)
 
 static int cd_mdplus_open_disc(char *rom, size_t size)
 {
+	// Never reuse a mount point across MD+ sessions. Main can restart before
+	// the previous orphan helper has finished, and sharing /tmp/cd-mdplus made
+	// that helper race with the next game and sometimes unmount its disc.
+	snprintf(cd_mdplus_mount_path, sizeof(cd_mdplus_mount_path),
+		"/tmp/cd-mdplus-%d-%u", (int)getpid(), ++cd_mdplus_session_id);
 	mkdir(cd_mdplus_mount_path, 0755);
-	umount2(cd_mdplus_mount_path, MNT_DETACH);
 	char device[32] = {};
 	for (int i = 0; i < 8; i++)
 	{
@@ -290,22 +398,54 @@ static int cd_mdplus_open_disc(char *rom, size_t size)
 		mount(device, cd_mdplus_mount_path, "iso9660", MS_RDONLY | MS_NOSUID | MS_NODEV, NULL)) return 0;
 	cd_mdplus_drive = open(device, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
 	if (cd_mdplus_drive >= 0) ioctl(cd_mdplus_drive, CDROM_SELECT_SPEED, 0);
-	return cd_mdplus_find_rom(rom, size);
+	if (!cd_mdplus_find_rom(rom, size)) return 0;
+
+	// Arm the MD+-local orphan cleanup only after the disc is mounted and
+	// validated. Failure to start the helper isn't fatal; normal teardown still
+	// works, but the helper protects core changes that terminate Main via _exit().
+	cd_mdplus_cleanup_watch_start(device);
+	return 1;
+}
+
+static void mdplus_runtime_reset()
+{
+	close_wav();
+	if (mdp.ddram)
+	{
+		shmem_unmap((void*)mdp.ddram, MDP_DDRAM_SIZE);
+	}
+	memset(&mdp, 0, sizeof(mdp));
 }
 
 static void cd_mdplus_close_disc()
 {
-	close_wav();
-	memset(&mdp, 0, sizeof(mdp));
+	mdplus_runtime_reset();
+	cd_mdplus_cleanup_watch_stop();
+
+	// A mounted optical filesystem can leave the kernel's tray lock asserted.
+	// Drop the mount before closing our drive handle, then explicitly unlock
+	// the door so a finished MD+ session never leaves the physical drive stuck.
+	if (umount(cd_mdplus_mount_path)) umount2(cd_mdplus_mount_path, MNT_DETACH);
+	rmdir(cd_mdplus_mount_path);
 	if (cd_mdplus_drive >= 0)
 	{
+		ioctl(cd_mdplus_drive, CDROM_LOCKDOOR, 0);
 		ioctl(cd_mdplus_drive, CDROM_SELECT_SPEED, 4);
 		close(cd_mdplus_drive);
 		cd_mdplus_drive = -1;
 	}
-	umount2(cd_mdplus_mount_path, MNT_DETACH);
+
 	cd_mdplus_state = 0;
 	cd_mdplus_osd_suppress_until = 0;
+	cd_mdplus_retry_until = 0;
+}
+
+void mdplus_cd_session_reset()
+{
+	// A new core load may reload A0CD-MDPlus directly, so the core name never
+	// becomes inactive between two discs. Always tear down the previous host
+	// session explicitly rather than relying on cd_mdplus_active() changing.
+	cd_mdplus_close_disc();
 }
 
 int mdplus_cd_suppress_osd()
@@ -327,16 +467,28 @@ void mdplus_cd_session_poll()
 		return;
 	}
 	if (cd_mdplus_state) return;
+
+	// A newly inserted optical disc may not be mountable on the very first
+	// poll while the drive is still becoming ready. Previously a single failed
+	// attempt set state to -1 permanently, so MD+ would never try again until
+	// Main/MiSTer was restarted. Retry failed startup attempts at a modest rate.
+	if (cd_mdplus_retry_until && !CheckTimer(cd_mdplus_retry_until)) return;
+	cd_mdplus_retry_until = 0;
+
 	cd_mdplus_state = 1;
 	char rom[PATH_MAX] = {};
 	if (!cd_mdplus_open_disc(rom, sizeof(rom)))
 	{
 		cd_mdplus_close_disc();
-		cd_mdplus_state = -1;
+		cd_mdplus_retry_until = GetTimer(500);
 		return;
 	}
 	cd_mdplus_state = 2;
-	if (!user_io_file_tx(rom, (2 << 6) | 1, 1, 0, 0, 0)) cd_mdplus_close_disc();
+	if (!user_io_file_tx(rom, (2 << 6) | 1, 1, 0, 0, 0))
+	{
+		cd_mdplus_close_disc();
+		cd_mdplus_retry_until = GetTimer(500);
+	}
 	else
 	{
 		cd_mdplus_osd_suppress_until = GetTimer(2000);
@@ -440,8 +592,7 @@ static uint32_t mdp_get_ms()
 // ring buffer. Does nothing if no CUE file is found (MD+ stays inactive).
 void mdplus_init(const char *rom_path)
 {
-	close_wav();
-	memset(&mdp, 0, sizeof(mdp));
+	mdplus_runtime_reset();
 
 	if (strcasecmp(user_io_get_core_name(1), "MegaDrive") && !cd_mdplus_active())
 		return;
