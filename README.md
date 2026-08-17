@@ -203,11 +203,9 @@ Physical Disc Support is still under active development.
 Current known issues include:
 
 - On PlayStation, some mixed-mode games such as **Ridge Racer** currently only play the first CD audio track correctly. Audio tracks beyond track 1 may not play.
-- **Audio CD swapping on PlayStation is currently not working.**
 - Some games may still require additional timing or CD audio compatibility fixes.
 - USB optical drive compatibility can vary between models.
 - Philips CD-i support is experimental.
-- 3DO support is currently unstable.
 
 ## Reporting Issues
 
