@@ -9,7 +9,6 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <time.h>
-#include <stdarg.h>
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/mount.h>
@@ -21,31 +20,6 @@
 #include "../../spi.h"
 #include "../../hardware.h"
 #include "../../menu.h"
-
-#define SNESMSU_DIAG_LOG "/media/fat/snesmsu1_diagnostic.log"
-
-static void snesmsu_diag(const char *fmt, ...)
-{
-	FILE *f = fopen(SNESMSU_DIAG_LOG, "a");
-	if (!f) return;
-
-	struct timespec ts;
-	clock_gettime(CLOCK_REALTIME, &ts);
-	struct tm tmv;
-	localtime_r(&ts.tv_sec, &tmv);
-	fprintf(f, "%04d-%02d-%02d %02d:%02d:%02d.%03ld pid=%d ",
-		tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
-		tmv.tm_hour, tmv.tm_min, tmv.tm_sec, ts.tv_nsec / 1000000,
-		(int)getpid());
-
-	va_list ap;
-	va_start(ap, fmt);
-	vfprintf(f, fmt, ap);
-	va_end(ap);
-	fputc('\n', f);
-	fclose(f);
-}
-
 
 static uint8_t hdr[512];
 
@@ -753,7 +727,6 @@ static int cd_snes_find_rom(char *path, size_t size)
 
 static int cd_snes_open_disc(char *rom, size_t size)
 {
-	snesmsu_diag("DISC open begin core=%s state=%d", user_io_get_core_name(1), cd_snes_state);
 	mkdir(cd_snes_mount_path, 0755);
 	umount2(cd_snes_mount_path, MNT_DETACH);
 	char device[32] = {};
@@ -765,28 +738,21 @@ static int cd_snes_open_disc(char *rom, size_t size)
 	}
 	if (!device[0])
 	{
-		snesmsu_diag("DISC no readable /dev/srN device found");
 		return 0;
 	}
-	snesmsu_diag("DISC device=%s mount=%s", device, cd_snes_mount_path);
 	if (mount(device, cd_snes_mount_path, "iso9660", MS_RDONLY | MS_NOSUID | MS_NODEV, "iocharset=utf8") &&
 		mount(device, cd_snes_mount_path, "iso9660", MS_RDONLY | MS_NOSUID | MS_NODEV, NULL))
 	{
-		snesmsu_diag("DISC mount FAILED errno=%d (%s)", errno, strerror(errno));
 		return 0;
 	}
-	snesmsu_diag("DISC mount OK");
 	cd_snes_drive = open(device, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
 	if (cd_snes_drive >= 0) ioctl(cd_snes_drive, CDROM_SELECT_SPEED, 0);
 	int found = cd_snes_find_rom(rom, size);
-	snesmsu_diag("DISC ROM discovery result=%d path=%s", found, found ? rom : "(none)");
 	return found;
 }
 
 static void cd_snes_close_disc(void)
 {
-	snesmsu_diag("DISC close begin state=%d mount=%s drive_fd=%d has_cd=%d audio_size=%u",
-		cd_snes_state, cd_snes_mount_path, cd_snes_drive, has_cd, f_audio.size);
 	cd_snes_stream_stop();
 	FileClose(&f_audio);
 
@@ -805,12 +771,10 @@ static void cd_snes_close_disc(void)
 	has_cd = 0;
 	snes_last_req = 255;
 	cd_snes_osd_suppress_until = 0;
-	snesmsu_diag("DISC close complete");
 }
 
 void snes_cd_session_reset(void)
 {
-	snesmsu_diag("SESSION reset requested core=%s", user_io_get_core_name(1));
 	// Like MD+, A0CD-SNES can be reloaded without an intermediate core name.
 	// Force the host-side MSU/disc session back to a cold state on every new
 	// core initialization so it cannot leak into a following MD+ session.
@@ -845,7 +809,6 @@ static int msu_send_data(fileTYPE *f, int idx)
 
 void snes_msu_init(const char* name)
 {
-	snesmsu_diag("INIT begin rom=%s core=%s cd_active=%d", name ? name : "(null)", user_io_get_core_name(1), cd_snes_active());
 	static fileTYPE f = {};
 	snes_last_req = 255;
 	cd_snes_stream_stop();
@@ -859,7 +822,6 @@ void snes_msu_init(const char* name)
 	snprintf(SelectedPath, sizeof(SelectedPath), "%s.msu", snes_romFileName);
 	has_cd = FileOpen(&f, SelectedPath) ? 1 : 0;
 	uint32_t size = f.size;
-	snesmsu_diag("INIT MSU file path=%s open=%d size=%u", SelectedPath, has_cd, size);
 	FileClose(&f);
 
 	printf("MSU: enable cd: %d\n", has_cd);
@@ -871,18 +833,10 @@ void snes_msu_init(const char* name)
 	}
 
 	msu_send_command((has_cd << 15) | MSU_CD_SET);
-	snesmsu_diag("INIT complete has_cd=%d rombase=%s", has_cd, snes_romFileName);
 }
 
 void snes_cd_session_poll(void)
 {
-	static int diag_announced = 0;
-	if (cd_snes_active() && !diag_announced)
-	{
-		snesmsu_diag("SESSION active core detected state=%d", cd_snes_state);
-		diag_announced = 1;
-	}
-	if (!cd_snes_active()) diag_announced = 0;
 	if (!cd_snes_active())
 	{
 		if (cd_snes_state) cd_snes_close_disc();
@@ -890,18 +844,15 @@ void snes_cd_session_poll(void)
 	}
 	if (cd_snes_state) return;
 	cd_snes_state = 1;
-	snesmsu_diag("SESSION startup attempt");
 	char rom[PATH_MAX] = {};
 	if (!cd_snes_open_disc(rom, sizeof(rom)))
 	{
-		snesmsu_diag("SESSION disc open failed");		cd_snes_close_disc();
+		cd_snes_close_disc();
 		cd_snes_state = -1;
 		return;
 	}
 	cd_snes_state = 2;
-	snesmsu_diag("ROM TX begin path=%s index=0 opensave=1", rom);
 	int snes_tx_ok = user_io_file_tx(rom, 0, 1, 0, 0, 0);
-	snesmsu_diag("ROM TX end result=%d", snes_tx_ok);
 	if (!snes_tx_ok) cd_snes_close_disc();
 	else
 	{
@@ -943,11 +894,10 @@ void snes_poll(void)
 			break;
 
 		case 0x35:
-			snesmsu_diag("FPGA AUDIO track request track=%u req=%u", data, req);
 			snprintf(SelectedPath, sizeof(SelectedPath), "%s-%d.pcm", snes_romFileName, data);
 			printf("MSU: New track selected: %s\n", SelectedPath);
 			FileOpen(&f_audio, SelectedPath);
-			snesmsu_diag("AUDIO PCM open path=%s size=%u", SelectedPath, f_audio.size);			if (cd_snes_streaming_active() && f_audio.size) cd_snes_stream_start(SelectedPath, 0);
+			if (cd_snes_streaming_active() && f_audio.size) cd_snes_stream_start(SelectedPath, 0);
 			printf(f_audio.size ? "MSU: Track mounted\n" : "MSU: Track not found!\n");
 			msu_send_command((f_audio.size << 16) | MSU_AUDIO_TRACK_MOUNTED);
 			break;
