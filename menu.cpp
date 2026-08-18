@@ -296,6 +296,11 @@ static int script_line;
 static char script_output[script_lines][script_line_length];
 static char script_line_output[script_line_length];
 static bool script_finished;
+static bool script_command_override;
+static bool script_override_graphical;
+static char script_override_command[script_line_length * 2];
+static char script_override_title[128];
+static char script_override_process[128];
 
 // one screen width
 static const char* HELPTEXT_SPACER = "                                ";
@@ -1111,7 +1116,35 @@ void build_advanced_map_summary(advancedButtonMap *abm, char *dest_str, size_t d
 static void *close_pipe_async(void *arg)
 {
 	pclose((FILE *)arg);
+	physical_disc_launch_resume_menu_discovery();
 	return NULL;
+}
+
+static int menu_queue_script_command(const char *command, const char *title, const char *process_name, bool graphical)
+{
+	if (!command || !*command || !is_menu()) return 0;
+
+	strncpy(script_override_command, command, sizeof(script_override_command) - 1);
+	script_override_command[sizeof(script_override_command) - 1] = 0;
+	strncpy(script_override_title, (title && *title) ? title : "Script", sizeof(script_override_title) - 1);
+	script_override_title[sizeof(script_override_title) - 1] = 0;
+	strncpy(script_override_process, (process_name && *process_name) ? process_name : "", sizeof(script_override_process) - 1);
+	script_override_process[sizeof(script_override_process) - 1] = 0;
+	script_command_override = true;
+	script_override_graphical = graphical;
+	parentstate = MENU_SCRIPTS;
+	menustate = MENU_SCRIPTS;
+	return 1;
+}
+
+int menu_launch_script_command(const char *command, const char *title, const char *process_name)
+{
+	return menu_queue_script_command(command, title, process_name, false);
+}
+
+int menu_launch_graphical_script_command(const char *command, const char *title, const char *process_name)
+{
+	return menu_queue_script_command(command, title, process_name, true);
 }
 
 void HandleUI(void)
@@ -7072,6 +7105,7 @@ void HandleUI(void)
 
 			unlink("/tmp/script");
 			FileSave("/tmp/script", cmd, strlen(cmd));
+			physical_disc_launch_suspend_menu_discovery();
 			ttystatus = 0;
 			ttypid = fork();
 			if (!ttypid)
@@ -7092,6 +7126,7 @@ void HandleUI(void)
 			if (waitpid(ttypid, 0, WNOHANG) > 0)
 			{
 				ttypid = 0;
+				physical_disc_launch_resume_menu_discovery();
 				user_io_osd_key_enable(1);
 			}
 		}
@@ -7138,11 +7173,27 @@ void HandleUI(void)
 		helptext_idx = 0;
 		menumask = 0;
 		menusub = 0;
-		if(parentstate != MENU_BTPAIR) OsdSetTitle(flist_SelectedItem()->de.d_name);
+		if(parentstate != MENU_BTPAIR && !script_override_graphical) OsdSetTitle(script_command_override ? script_override_title : flist_SelectedItem()->de.d_name);
 		menustate = MENU_SCRIPTS1;
 		if (parentstate != MENU_BTPAIR) parentstate = MENU_SCRIPTS;
-		for (int i = 0; i < OsdGetSize() - 1; i++) OsdWrite(i);
-		OsdWrite(OsdGetSize() - 1, (parentstate == MENU_BTPAIR) ? "           Finish" : "           Cancel", menusub == 0, 0);
+		if (script_override_graphical)
+		{
+			// Graphical foreground applications draw directly to /dev/fb0.
+			// Route the MiSTer video output to the Linux framebuffer just like
+			// the normal fb_terminal script path does.
+			OsdDisable();
+			video_chvt(2);
+			video_fb_enable(1);
+			vga_nag();
+			// The graphical script output is redirected, so its ANSI cursor-hide
+			// escape never reaches tty2. Hide the Linux console cursor explicitly.
+			system("printf '\\033[?25l' > /dev/tty2");
+		}
+		else
+		{
+			for (int i = 0; i < OsdGetSize() - 1; i++) OsdWrite(i);
+			OsdWrite(OsdGetSize() - 1, (parentstate == MENU_BTPAIR) ? "           Finish" : "           Cancel", menusub == 0, 0);
+		}
 		for (int i = 0; i < script_lines; i++) strcpy(script_output[i], "");
 		script_line=0;
 		script_finished = false;
@@ -7160,17 +7211,21 @@ void HandleUI(void)
 		}
 		else
 		{
-			script_pipe = popen(getFullPath(selPath), "r");
+			physical_disc_launch_suspend_menu_discovery();
+			script_pipe = popen(script_command_override ? script_override_command : getFullPath(selPath), "r");
 		}
 		script_file = fileno(script_pipe);
 		fcntl(script_file, F_SETFL, O_NONBLOCK);
 		break;
 
 	case MENU_SCRIPTS1:
+		// Graphical foreground applications own the framebuffer while running.
+		// Keep MiSTer's OSD hidden for their entire lifetime.
+		if (script_override_graphical) OsdDisable();
 		if (!script_finished)
 		{
 			if (!feof(script_pipe)) {
-				if (fgets(script_line_output, script_line_length, script_pipe) != NULL)
+				if (fgets(script_line_output, script_line_length, script_pipe) != NULL && !script_override_graphical)
 				{
 					script_line_output[strcspn(script_line_output, "\n")] = 0;
 					if (script_line < OsdGetSize() - 2)
@@ -7187,12 +7242,28 @@ void HandleUI(void)
 			}
 			else {
 				pclose(script_pipe);
+				script_pipe = NULL;
+				if (parentstate != MENU_BTPAIR) physical_disc_launch_resume_menu_discovery();
 				cpu_set_t set;
 				CPU_ZERO(&set);
 				CPU_SET(1, &set);
 				sched_setaffinity(0, sizeof(set), &set);
+				bool was_graphical = script_override_graphical;
 				script_finished=true;
-				OsdWrite(OsdGetSize() - 1, "             OK", menusub == 0, 0);
+				script_command_override = false;
+				script_override_graphical = false;
+				if (was_graphical)
+				{
+					// Mirror the normal framebuffer-script teardown. Merely disabling
+					// the framebuffer leaves the OSD disabled after our repeated
+					// OsdDisable() calls, resulting in a wallpaper-only menu.
+					system("printf '\\033[?25h' > /dev/tty2");
+					video_menu_bg(user_io_status_get("[3:1]"));
+					video_fb_enable(0);
+					OsdClear();
+					OsdEnable(DISABLE_KEYBOARD);
+				}
+				else OsdWrite(OsdGetSize() - 1, "             OK", menusub == 0, 0);
 			};
 		};
 
@@ -7201,18 +7272,34 @@ void HandleUI(void)
 			if (!script_finished)
 			{
 				strcpy(script_command, "killall ");
-				strcat(script_command, (parentstate == MENU_BTPAIR) ? "-SIGINT btpair btctl" : flist_SelectedItem()->de.d_name);
+				if (parentstate == MENU_BTPAIR) strcat(script_command, "-SIGINT btpair btctl");
+				else if (script_command_override && script_override_process[0]) strcat(script_command, script_override_process);
+				else strcat(script_command, flist_SelectedItem()->de.d_name);
 				system(script_command);
+				bool was_graphical = script_override_graphical;
 				FILE *p = script_pipe;
 				script_pipe = NULL;
 				pthread_t tid;
 				if (!pthread_create(&tid, NULL, close_pipe_async, p)) pthread_detach(tid);
-				else { printf("close_pipe_async: pthread_create failed\n"); pclose(p); }
+				else { printf("close_pipe_async: pthread_create failed\n"); pclose(p); physical_disc_launch_resume_menu_discovery(); }
 				cpu_set_t set;
 				CPU_ZERO(&set);
 				CPU_SET(1, &set);
 				sched_setaffinity(0, sizeof(set), &set);
 				script_finished = true;
+				script_command_override = false;
+				script_override_graphical = false;
+				if (was_graphical)
+				{
+					// Mirror the normal framebuffer-script teardown. Merely disabling
+					// the framebuffer leaves the OSD disabled after our repeated
+					// OsdDisable() calls, resulting in a wallpaper-only menu.
+					system("printf '\\033[?25h' > /dev/tty2");
+					video_menu_bg(user_io_status_get("[3:1]"));
+					video_fb_enable(0);
+					OsdClear();
+					OsdEnable(DISABLE_KEYBOARD);
+				}
 			};
 
 			if (c == KEY_BACKSPACE && (parentstate == MENU_BTPAIR))

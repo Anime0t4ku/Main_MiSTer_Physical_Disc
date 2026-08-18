@@ -17,6 +17,11 @@ void Info(const char *message, int timeout = 2000, int width = 0, int height = 0
 void MenuHide();
 void SelectINI();
 
+// Launch a script command through MiSTer's normal script lifecycle.
+// Returns non-zero when the command was queued.
+int menu_launch_script_command(const char *command, const char *title, const char *process_name);
+int menu_launch_graphical_script_command(const char *command, const char *title, const char *process_name);
+
 void open_joystick_setup();
 int menu_lightgun_cb(int idx, uint16_t type, uint16_t code, int value);
 

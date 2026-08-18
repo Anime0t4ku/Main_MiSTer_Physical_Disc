@@ -32,6 +32,10 @@ void physical_disc_launch_poll(void);
 
 int physical_disc_launch_menu_tick(void);
 
+void physical_disc_launch_suspend_menu_discovery(void);
+
+void physical_disc_launch_resume_menu_discovery(void);
+
 
 int physical_disc_launch_busy(void);
 

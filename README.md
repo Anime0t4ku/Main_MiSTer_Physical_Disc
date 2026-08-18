@@ -141,9 +141,12 @@ AUDIOCD=A0CD-TurboGrafx16-CD
 AUDIOCD=A0CD-NeoGeoCD
 AUDIOCD=A0CD-CDi
 AUDIOCD=A0CD-3DO
+AUDIOCD=MISTERHIFI
 ```
 
 Only use **one** `AUDIOCD=` entry.
+
+`AUDIOCD=MISTERHIFI` launches **MiSTer Hi-Fi** directly into Physical Audio CD playback. MiSTer Hi-Fi must be installed at `/media/fat/Scripts/misterhifi.sh`.
 
 For example:
 

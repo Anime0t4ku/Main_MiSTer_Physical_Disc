@@ -45,8 +45,10 @@ static int menu_detecting = 0;
 static int menu_environment_ready = 0;
 static int menu_boot_checked = 0;
 static int menu_ignore_boot_disc = 0;
+static int menu_discovery_suspended = 0;
 #define PHYSICAL_DISC_HANDLED_FILE "/tmp/physical_disc_menu_handled"
 #define PHYSICAL_DISC_MGL_DIR "/media/fat/_Physical Disc Cores"
+#define MISTER_HIFI_SCRIPT "/media/fat/Scripts/misterhifi.sh"
 
 static int sector_has_data(const uint8_t *data)
 {
@@ -276,6 +278,12 @@ static void menu_write_handled(unsigned int value)
 	if (f) { fprintf(f, "%08x\n", value); fclose(f); }
 }
 
+static int menu_audio_hifi(void)
+{
+	const char *name = cfg.physical_disc_audio_cd;
+	return name && !strcasecmp(name, "MISTERHIFI");
+}
+
 static const char *menu_audio_mgl(void)
 {
 	const char *name = cfg.physical_disc_audio_cd;
@@ -363,9 +371,32 @@ int physical_disc_launch_consume_startup_osd_suppression(void)
 	return 1;
 }
 
+void physical_disc_launch_suspend_menu_discovery(void)
+{
+	if (menu_discovery_suspended) return;
+
+	menu_discovery_suspended = 1;
+	physical_disc_launch_cancel();
+	physical_disc_close();
+	menu_detecting = 0;
+	menu_poll_at = 0;
+	printf("DISC: Auto Disc Discovery suspended while script is running\n");
+}
+
+void physical_disc_launch_resume_menu_discovery(void)
+{
+	if (!menu_discovery_suspended) return;
+
+	menu_discovery_suspended = 0;
+	menu_detecting = 0;
+	menu_poll_at = 0;
+	printf("DISC: Auto Disc Discovery resumed after script exit\n");
+}
+
 int physical_disc_launch_menu_tick(void)
 {
 	if (!is_menu()) return 0;
+	if (menu_discovery_suspended) return 0;
 
 	// Auto Disc Discovery is optional. When disabled, do not touch the
 	// optical drive from the menu at all. This is particularly important
@@ -440,10 +471,27 @@ int physical_disc_launch_menu_tick(void)
 	}
 
 	physical_disc_disc_t type = physical_disc_identify();
-	const char *mgl = menu_mgl_for_disc(type);
+	const int launch_hifi = type == PHYSICAL_DISC_DISC_AUDIO && menu_audio_hifi();
+	const char *mgl = launch_hifi ? NULL : menu_mgl_for_disc(type);
 	menu_write_handled(fingerprint);
 	physical_disc_close();
 	menu_detecting = 0;
+
+	if (launch_hifi)
+	{
+		if (!FileExists(MISTER_HIFI_SCRIPT))
+		{
+			printf("DISC: AUDIOCD=MISTERHIFI requested but %s was not found\n", MISTER_HIFI_SCRIPT);
+			return 0;
+		}
+		char command[512];
+		// Hi-Fi is a framebuffer application, not a text-mode MiSTer script.
+		// Keep stdout/stderr away from MiSTer's script OSD (the launcher emits
+		// terminal escape sequences) and use the graphical tracked-script path.
+		snprintf(command, sizeof(command), "%s --physical-cd >/dev/null 2>&1", MISTER_HIFI_SCRIPT);
+		printf("DISC: launching MiSTer Hi-Fi for Audio CD\n");
+		return menu_launch_graphical_script_command(command, "MiSTer Hi-Fi", "mister_hifi");
+	}
 
 	if (!mgl) return 0;
 	char path[512];
