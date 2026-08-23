@@ -2653,7 +2653,11 @@ void HandleUI(void)
 									menustate = MENU_GENERIC_MAIN1;
 									if (p[0] == 'R' || p[0] == 'r')
 									{
-										physical_disc_launch_reset();
+										// 'R' covers every momentary option, not just Reset - the PSX core
+										// also uses it for Save state, Restore state and Save Memory Cards.
+										// Re-mounting on those killed the core mid-save, so only do it for
+										// an actual reset (bit 0).
+										if (!bit) physical_disc_launch_reset();
 										menustate = MENU_NONE1;
 									}
 								}
