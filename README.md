@@ -76,6 +76,22 @@ The MGL files make it easy to manually select which Physical Disc core should be
 
 They are also useful for Audio CDs, as you can simply launch the MGL for the core you want to use.
 
+## Playing DVD-Video discs (DVD core)
+
+Physical DVD movies play on the **DVD** core: insert the disc and open the DVD core — data
+(unencrypted) discs work as-is.
+
+Most retail DVDs are encrypted (CSS). To play those, install the DVD decryption library once:
+
+1. Run **`install_dvdcss`** from the MiSTer **Scripts** menu.
+2. Insert the disc.
+3. Open the DVD core.
+
+That's it — encrypted discs now play. If an encrypted disc doesn't start (black screen, or a
+**`CSS ENCRYPTED`** message), the library isn't installed yet — run the script above. (The
+library, libdvdcss, is not part of MiSTer and is not bundled here; the script downloads it for
+you.)
+
 ## Auto Disc Detection
 
 Auto Disc Detection is an optional extra feature that can automatically identify a newly inserted disc and launch the appropriate Physical Disc core.
