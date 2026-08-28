@@ -34,6 +34,8 @@
 #include "shmem.h"
 #include "ide.h"
 #include "ide_cdrom.h"
+#include "support/physical_disc/physical_disc.h"
+#include "support/physical_disc/physical_disc_css.h"
 #ifdef PROFILING
 #include "profiling.h"
 #endif
@@ -49,6 +51,7 @@ static fileTYPE sd_image[16] = {};
 #define  SD_TYPE_DEFAULT 0
 #define  SD_TYPE_C64 1
 #define  SD_TYPE_A2 2
+#define  SD_TYPE_DVDCSS 3   // physical DVD-Video, sectors served CSS-decrypted via libdvdcss
 
 static int      sd_type[16] = {};
 static unsigned char last_file_ext_idx = 0;
@@ -407,6 +410,13 @@ char is_3do()
 	return (is_3do_type == 1);
 }
 
+static int is_dvd_type = 0;
+char is_dvd()
+{
+	if (!is_dvd_type) is_dvd_type = strcasecmp(orig_name, "DVD") ? 2 : 1;
+	return (is_dvd_type == 1);
+}
+
 static int is_no_type = 0;
 static int disable_osd = 0;
 char has_menu()
@@ -444,6 +454,8 @@ void user_io_read_core_name()
 	is_saturn_type = 0;
 	is_n64_type = 0;
 	is_uneon_type = 0;
+	is_3do_type = 0;
+	is_dvd_type = 0;
 	core_name[0] = 0;
 
 	char *p = user_io_get_confstr(0);
@@ -2099,12 +2111,27 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 	int img_type = 0; // disk image type (for C128 core): bit 0=dual sided, 1=raw GCR supported, 2=raw MFM supported, 3=high density
 
 	sd_image_cangrow[index] = (pre != 0);
+	if (sd_type[index] == SD_TYPE_DVDCSS) physical_disc_css_close();
 	sd_type[index] = SD_TYPE_DEFAULT ;
 	if (len)
 	{
 		if (!ret)
 		{
-			if (x2trd_ext_supp(name))
+			if (!strcmp(name, PHYSICAL_DISC_SENTINEL) && is_dvd())
+			{
+				// Physical DVD-Video: no file to open. libdvdcss (user-supplied)
+				// serves CSS-decrypted 2048-byte sectors; the slot is drive-backed
+				// and read-only. If libdvdcss is absent this fails and the mount is
+				// rejected (the user is told to run Scripts/install_dvdcss).
+				if (physical_disc_css_open())
+				{
+					sd_type[index] = SD_TYPE_DVDCSS;
+					sd_image[index].size = physical_disc_css_size();
+					writable = 0;
+					ret = 1;
+				}
+			}
+			else if (x2trd_ext_supp(name))
 			{
 				ret = x2trd(name, sd_image + index);
 			}
@@ -3395,6 +3422,15 @@ void user_io_poll()
 						done = 1;
 						buffer_lba[disk] = lba;
 					}
+					else if (sd_type[disk] == SD_TYPE_DVDCSS)
+					{
+						diskled_on();
+						if (physical_disc_css_read(buffer[disk], lba, buf_n) > 0)
+						{
+							done = 1;
+							buffer_lba[disk] = lba;
+						}
+					}
 					else if (sd_image[disk].size)
 					{
 						diskled_on();
@@ -3480,6 +3516,18 @@ void user_io_poll()
 					{
 						cdi_read_cd(buffer[disk], lba, buf_n);
 						buffer_lba[disk] = lba;
+					}
+					else if (sd_type[disk] == SD_TYPE_DVDCSS)
+					{
+						if (physical_disc_css_read(buffer[disk], lba, buf_n) > 0)
+						{
+							buffer_lba[disk] = lba;
+						}
+						else
+						{
+							memset(buffer[disk], 0, sizeof(buffer[disk]));
+							buffer_lba[disk] = -1;
+						}
 					}
 					else if (FileSeek(&sd_image[disk], lba * blksz, SEEK_SET) &&
 						FileReadAdv(&sd_image[disk], buffer[disk], sizeof(buffer[disk])))

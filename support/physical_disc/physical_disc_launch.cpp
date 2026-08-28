@@ -98,6 +98,7 @@ int physical_disc_mount_current_core(void)
 		}
 	}
 	else if (is_cdi()) ok = cdi_mount_cd(0, PHYSICAL_DISC_SENTINEL);
+	else if (is_dvd()) ok = user_io_file_mount(PHYSICAL_DISC_SENTINEL, 0);
 	else known = 0;
 
 	if (!known)
