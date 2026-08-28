@@ -4,6 +4,7 @@
 // use is its published API, declared here so the build needs no libdvdcss headers.
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
 #include <stdint.h>
 #include <errno.h>
@@ -16,6 +17,21 @@
 #include <linux/fs.h>
 
 #include "physical_disc_css.h"
+
+// Log to stdout AND to a file, so the reason for a failed mount is visible over
+// SSH regardless of which (possibly supervised) MiSTer instance handled it.
+#define CSS_LOG_PATH "/tmp/dvdcss.log"
+static void css_log(const char *fmt, ...)
+{
+	char buf[256];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, ap);
+	va_end(ap);
+	printf("CSS: %s\n", buf);
+	FILE *f = fopen(CSS_LOG_PATH, "a");
+	if (f) { fprintf(f, "%s\n", buf); fclose(f); }
+}
 
 // --- libdvdcss API (from dvdcss.h; reproduced so we need no external headers) ---
 typedef struct dvdcss_s *dvdcss_t;
@@ -59,13 +75,14 @@ static int load_library(void)
 		css_lib = dlopen(css_lib_names[i], RTLD_NOW | RTLD_LOCAL);
 		if (css_lib)
 		{
-			printf("CSS: loaded %s\n", css_lib_names[i]);
+			css_log("loaded %s", css_lib_names[i]);
 			break;
 		}
+		css_log("dlopen(%s): %s", css_lib_names[i], dlerror());
 	}
 	if (!css_lib)
 	{
-		printf("CSS: libdvdcss not found — run Scripts/install_dvdcss to play encrypted discs\n");
+		css_log("libdvdcss not found — run Scripts/install_dvdcss to play encrypted discs");
 		return 0;
 	}
 
@@ -77,7 +94,7 @@ static int load_library(void)
 
 	if (!p_open || !p_close || !p_seek || !p_read)
 	{
-		printf("CSS: libdvdcss is missing required symbols\n");
+		css_log("libdvdcss is missing required symbols");
 		dlclose(css_lib);
 		css_lib = NULL;
 		return 0;
@@ -88,8 +105,13 @@ static int load_library(void)
 // Find the first /dev/srN that currently holds a disc. Returns 1 and fills `out`
 // on success. Mirrors the drive scan in physical_disc.cpp, but opens nothing that
 // would collide with libdvdcss (it needs its own handle for the CSS ioctls).
+// The disc may report CDS_DRIVE_NOT_READY while it spins up, so a not-ready drive
+// with media is accepted as a fallback and left for dvdcss_open to spin up.
 static int find_dvd_device(char *out, int outsz)
 {
+	char fallback[32] = "";
+	uint64_t fb_size = 0;
+
 	for (int i = 0; i < 8; i++)
 	{
 		char path[32];
@@ -98,16 +120,32 @@ static int find_dvd_device(char *out, int outsz)
 		if (fd < 0) continue;
 
 		int status = ioctl(fd, CDROM_DRIVE_STATUS, CDSL_CURRENT);
+		uint64_t bytes = 0;
+		if (ioctl(fd, BLKGETSIZE64, &bytes) < 0) bytes = 0;
+		close(fd);
+
+		css_log("scan %s: drive_status=%d size=%lluMB", path, status,
+		        (unsigned long long)(bytes >> 20));
+
 		if (status == CDS_DISC_OK)
 		{
-			uint64_t bytes = 0;
-			if (ioctl(fd, BLKGETSIZE64, &bytes) < 0) bytes = 0;
 			css_size = bytes;
-			close(fd);
 			snprintf(out, outsz, "%s", path);
 			return 1;
 		}
-		close(fd);
+		if (status == CDS_DRIVE_NOT_READY && fallback[0] == '\0')
+		{
+			snprintf(fallback, sizeof(fallback), "%s", path);
+			fb_size = bytes;
+		}
+	}
+
+	if (fallback[0])
+	{
+		css_log("no ready disc; trying not-ready %s (spinning up)", fallback);
+		css_size = fb_size;
+		snprintf(out, outsz, "%s", fallback);
+		return 1;
 	}
 	return 0;
 }
@@ -115,23 +153,39 @@ static int find_dvd_device(char *out, int outsz)
 int physical_disc_css_open(void)
 {
 	if (css) return 1;
+	css_log("open: begin");
 	if (!load_library()) return 0;
 
 	char dev[32];
 	if (!find_dvd_device(dev, sizeof(dev)))
 	{
-		printf("CSS: no readable disc in an optical drive\n");
+		css_log("no readable disc in an optical drive");
 		return 0;
 	}
 
 	css = p_open(dev);
 	if (!css)
 	{
-		printf("CSS: dvdcss_open(%s) failed\n", dev);
+		css_log("dvdcss_open(%s) failed", dev);
 		return 0;
 	}
+
+	// If the size was not available at scan time (drive was still spinning up),
+	// read it now that the device is open and the disc is ready.
+	if (css_size == 0)
+	{
+		int fd = open(dev, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+		if (fd >= 0)
+		{
+			uint64_t bytes = 0;
+			if (ioctl(fd, BLKGETSIZE64, &bytes) == 0) css_size = bytes;
+			close(fd);
+		}
+	}
+
 	css_pos = -1;
-	printf("CSS: opened %s (%llu MB)\n", dev, (unsigned long long)(css_size >> 20));
+	css_log("opened %s (%llu MB)%s", dev, (unsigned long long)(css_size >> 20),
+	        css_size ? "" : "  <-- WARNING size 0, core will reject");
 	return 1;
 }
 
@@ -156,7 +210,7 @@ int physical_disc_css_read(void *buf, uint32_t lba, uint32_t count)
 	{
 		if (p_seek(css, (int)lba, DVDCSS_SEEK_KEY) < 0)
 		{
-			printf("CSS: seek to %u failed: %s\n", lba, p_error ? p_error(css) : "?");
+			css_log("seek to %u failed: %s", lba, p_error ? p_error(css) : "?");
 			css_pos = -1;
 			return -1;
 		}
@@ -165,7 +219,7 @@ int physical_disc_css_read(void *buf, uint32_t lba, uint32_t count)
 	int n = p_read(css, buf, (int)count, DVDCSS_READ_DECRYPT);
 	if (n < 0)
 	{
-		printf("CSS: read %u@%u failed: %s\n", count, lba, p_error ? p_error(css) : "?");
+		css_log("read %u@%u failed: %s", count, lba, p_error ? p_error(css) : "?");
 		css_pos = -1;
 		return -1;
 	}
