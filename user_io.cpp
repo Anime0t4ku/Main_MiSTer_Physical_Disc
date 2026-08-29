@@ -3215,6 +3215,17 @@ void user_io_poll()
 	snes_cd_session_poll();
 	mdplus_cd_session_poll();
 
+	if (is_dvd())
+	{
+		static int ct_logged = 0;
+		if (!ct_logged)
+		{
+			ct_logged = 1;
+			physical_disc_css_diag("poll: core_type=0x%02x CORE_8BIT=0x%02x is_menu=%d is_minimig=%d x86=%d",
+				core_type, CORE_TYPE_8BIT, is_menu(), is_minimig(), (int)(is_x86() || is_pcxt()));
+		}
+	}
+
 	if (is_x86() || is_pcxt())
 	{
 		x86_poll(0);
@@ -3241,6 +3252,11 @@ void user_io_poll()
 			}
 
 			uint16_t c = spi_uio_cmd_cont(UIO_GET_SDSTAT);
+			if (is_dvd() && (c & 0x8000))
+			{
+				static int sd_diag_n = 0;
+				if (sd_diag_n < 40) { sd_diag_n++; physical_disc_css_diag("sdstat c=%04x", c); }
+			}
 			if (c & 0x8000)
 			{
 				disk = (c >> 2) & 0xF;
