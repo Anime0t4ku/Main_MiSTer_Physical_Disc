@@ -49,6 +49,7 @@ typedef int (*fn_close_t)(dvdcss_t);
 typedef int (*fn_seek_t)(dvdcss_t, int, int);
 typedef int (*fn_read_t)(dvdcss_t, void *, int, int);
 typedef char *(*fn_error_t)(dvdcss_t);
+typedef int (*fn_scram_t)(dvdcss_t);
 
 static void *css_lib = NULL;
 static fn_open_t  p_open  = NULL;
@@ -56,6 +57,7 @@ static fn_close_t p_close = NULL;
 static fn_seek_t  p_seek  = NULL;
 static fn_read_t  p_read  = NULL;
 static fn_error_t p_error = NULL;
+static fn_scram_t p_scram = NULL;   // dvdcss_is_scrambled (optional; absent on old libs)
 
 static dvdcss_t css = NULL;
 static uint64_t css_size = 0;   // bytes
@@ -95,6 +97,7 @@ static int load_library(void)
 	p_seek  = (fn_seek_t)  dlsym(css_lib, "dvdcss_seek");
 	p_read  = (fn_read_t)  dlsym(css_lib, "dvdcss_read");
 	p_error = (fn_error_t) dlsym(css_lib, "dvdcss_error");
+	p_scram = (fn_scram_t) dlsym(css_lib, "dvdcss_is_scrambled");
 
 	if (!p_open || !p_close || !p_seek || !p_read)
 	{
@@ -332,9 +335,13 @@ static void build_vob_list(void)
 	// Fetch each VOB's title key at its start sector. With a drive region set this
 	// is instant (ioctl); with none it's a slow crack — say so on screen instead of
 	// leaving an unexplained black screen. Also show a bar (blocks the main loop).
+	// The region matters only for a scrambled disc — an unencrypted DVD needs no
+	// key, so don't warn about cracking there. dvdcss_is_scrambled is optional;
+	// assume scrambled if the lib is too old to tell (rather than hide a real warning).
+	int scrambled = p_scram ? (p_scram(css) != 0) : 1;
 	// Sidebar title fits ~9 chars; the main line is capped at 27 (ProgressMessage).
 	const char *title = "DVD";
-	const char *text  = region_set ? "Preparing disc" : "No drive region: cracking";
+	const char *text  = (!region_set && scrambled) ? "No drive region: cracking" : "Preparing disc";
 	ProgressMessage();   // reset so the first update renders
 	int keyed = 0;
 	for (int i = 0; i < g_nvobs; i++)
