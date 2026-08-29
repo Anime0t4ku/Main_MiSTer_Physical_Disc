@@ -191,7 +191,7 @@ The tutorial was written by **NinoPrime** and covers the process of preparing an
 
 ## DVD-Video discs
 
-Movie DVDs play on the **DVD** core, launched like any other Physical Disc core. Unencrypted DVDs need nothing extra. Most retail DVDs are CSS-encrypted; to play those, run **`install_dvdcss`** from the Scripts menu once (it downloads libdvdcss, which is not bundled here). A **`CSS ENCRYPTED`** message means the library is not installed yet.
+Movie DVDs play on the **DVD** core, launched like any other Physical Disc core. Unencrypted DVDs need nothing extra. Most retail DVDs are CSS-encrypted; to play those you need libdvdcss, which is not bundled here. Copy `Scripts/install_dvdcss.sh` to `/media/fat/Scripts/`, then run **`install_dvdcss`** from the MiSTer Scripts menu once — it downloads the library for you. A **`CSS ENCRYPTED`** message means it is not installed yet.
 
 ## Updating
 
