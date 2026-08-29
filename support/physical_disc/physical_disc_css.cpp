@@ -225,13 +225,18 @@ static int iso_find(uint32_t dir_lba, uint32_t dir_len, const char *name, int wa
 	return 0;
 }
 
-// SEEK_KEY at every *.VOB file's START sector so libdvdcss cracks/caches that
-// title's key at a reliable position (a VOB start), not wherever the core reads.
-static int precrack_vobs(uint32_t dir_lba, uint32_t dir_len)
+// The VOB start LBAs, discovered at mount. Each title key is cracked LAZILY on
+// first access to its VOB (a ~2 s SEEK_KEY), never all-at-once at mount — a
+// synchronous full pre-crack froze the HPS main loop and blanked the core.
+#define MAX_VOBS 64
+static struct { uint32_t start; unsigned char cracked; } g_vobs[MAX_VOBS];
+static int g_nvobs = 0;
+
+// Collect every *.VOB file's start LBA (no cracking).
+static void collect_vobs(uint32_t dir_lba, uint32_t dir_len)
 {
 	uint8_t sec[2048];
 	uint32_t nsec = (dir_len + 2047) / 2048;
-	int keyed = 0;
 	for (uint32_t s = 0; s < nsec; s++)
 	{
 		if (css_raw_read(dir_lba + s, sec, 1) < 1) break;
@@ -243,43 +248,67 @@ static int precrack_vobs(uint32_t dir_lba, uint32_t dir_len)
 			uint8_t flags = sec[off + 25];
 			uint8_t nlen = sec[off + 32];
 			const char *nm = (const char *)(sec + off + 33);
-			if (!(flags & 0x02) && name_has_vob(nm, nlen))
+			if (!(flags & 0x02) && name_has_vob(nm, nlen) && g_nvobs < MAX_VOBS)
 			{
-				uint32_t vob_lba = rd_le32(sec + off + 2);
-				if (p_seek(css, (int)vob_lba, DVDCSS_SEEK_KEY) >= 0)
-				{
-					keyed++;
-					css_log("precrack: key OK, VOB @ lba=%u", vob_lba);
-				}
-				else
-				{
-					css_log("precrack: VOB @ lba=%u (unscrambled / no key)", vob_lba);
-				}
+				g_vobs[g_nvobs].start = rd_le32(sec + off + 2);
+				g_vobs[g_nvobs].cracked = 0;
+				g_nvobs++;
 			}
 			off += rlen;
 		}
 	}
-	return keyed;
 }
 
-// Walk ISO9660 (root -> VIDEO_TS) and pre-crack every VOB title key.
-static void precrack_title_keys(void)
+// Walk ISO9660 (root -> VIDEO_TS) and record every VOB start LBA (fast, no crack).
+static void build_vob_list(void)
 {
+	g_nvobs = 0;
 	uint8_t sec[2048];
-	if (css_raw_read(16, sec, 1) < 1) { css_log("precrack: PVD read failed"); return; }
-	if (memcmp(sec + 1, "CD001", 5) != 0) { css_log("precrack: not ISO9660"); return; }
+	if (css_raw_read(16, sec, 1) < 1) { css_log("vobs: PVD read failed"); return; }
+	if (memcmp(sec + 1, "CD001", 5) != 0) { css_log("vobs: not ISO9660"); return; }
 
 	uint32_t root_lba = rd_le32(sec + 156 + 2);
 	uint32_t root_len = rd_le32(sec + 156 + 10);
 	uint32_t vts_lba = 0, vts_len = 0;
 	if (!iso_find(root_lba, root_len, "VIDEO_TS", 1, &vts_lba, &vts_len))
 	{
-		css_log("precrack: VIDEO_TS dir not found");
+		css_log("vobs: VIDEO_TS dir not found");
 		return;
 	}
-	int n = precrack_vobs(vts_lba, vts_len);
-	css_log("precrack: keyed %d VOB(s)", n);
-	css_pos = -1;   // our position tracking is stale after the pre-crack seeks
+	collect_vobs(vts_lba, vts_len);
+
+	// sort by start LBA so ensure_key() can pick the VOB containing a read LBA
+	for (int i = 1; i < g_nvobs; i++)
+	{
+		uint32_t v = g_vobs[i].start;
+		int j = i - 1;
+		while (j >= 0 && g_vobs[j].start > v) { g_vobs[j + 1].start = g_vobs[j].start; j--; }
+		g_vobs[j + 1].start = v;
+	}
+	css_log("vobs: found %d VOB(s)", g_nvobs);
+	css_pos = -1;
+}
+
+// Crack (once) the title key for the VOB containing `lba`, at that VOB's START —
+// the position where libdvdcss's title crack is reliable. Blocks ~2 s the first
+// time each VOB is touched, then never again.
+static void ensure_key(uint32_t lba)
+{
+	int idx = -1;
+	for (int i = 0; i < g_nvobs; i++)
+	{
+		if (g_vobs[i].start <= lba) idx = i;
+		else break;
+	}
+	if (idx < 0 || g_vobs[idx].cracked) return;
+
+	if (p_seek(css, (int)g_vobs[idx].start, DVDCSS_SEEK_KEY) >= 0)
+		css_log("key cracked: VOB @ lba=%u (for read lba=%u)", g_vobs[idx].start, lba);
+	else
+		css_log("VOB @ lba=%u unscrambled / no key", g_vobs[idx].start);
+
+	g_vobs[idx].cracked = 1;   // don't retry every read, even if it had no key
+	css_pos = -1;              // SEEK_KEY moved the device position
 }
 
 int physical_disc_css_open(void)
@@ -325,8 +354,8 @@ int physical_disc_css_open(void)
 	css_log("opened %s (%llu MB)%s", dev, (unsigned long long)(css_size >> 20),
 	        css_size ? "" : "  <-- WARNING size 0, core will reject");
 
-	// Pre-crack every VOB title key now, at the reliable VOB-start positions.
-	precrack_title_keys();
+	// Discover the VOB layout now (fast); keys are cracked lazily on first access.
+	build_vob_list();
 	return 1;
 }
 
@@ -344,9 +373,10 @@ int physical_disc_css_read(void *buf, uint32_t lba, uint32_t count)
 {
 	if (!css) return -1;
 
-	// Keys were pre-cracked at the VOB starts (precrack_title_keys), so here we
-	// just position (DVDCSS_NOFLAGS) and DVDCSS_READ_DECRYPT decrypts each block
-	// with the cached title key for that LBA's title — libdvdread's css_seek/read.
+	// Make sure this LBA's VOB title key is cracked (once, at the VOB start), then
+	// just position (DVDCSS_NOFLAGS); DVDCSS_READ_DECRYPT decrypts each block with
+	// the cached title key for that LBA's title — libdvdread's css_title/css_seek.
+	ensure_key(lba);
 	if ((int)lba != css_pos)
 	{
 		if (p_seek(css, (int)lba, DVDCSS_NOFLAGS) < 0)
