@@ -217,19 +217,23 @@ int physical_disc_css_read(void *buf, uint32_t lba, uint32_t count)
 {
 	if (!css) return -1;
 
-	// Seek with DVDCSS_SEEK_MPEG on a discontinuity: libdvdcss fetches (and caches)
-	// the title key when the sector is inside a VTS, and just continues for the
-	// unscrambled filesystem/IFO sectors (DVDCSS_SEEK_KEY hard-fails on those).
-	// DVDCSS_READ_DECRYPT then passes unscrambled sectors through and descrambles
-	// scrambled ones with the cached title key.
+	// On a discontinuity, first try to fetch the title key for this sector
+	// (DVDCSS_SEEK_KEY) — that works for VTS/VOB sectors. The filesystem/IFO
+	// sectors (e.g. 0, 16) are NOT in any title, so that fetch hard-fails; there
+	// we fall back to a plain positioning seek (DVDCSS_NOFLAGS). Those sectors are
+	// unscrambled, so DVDCSS_READ_DECRYPT returns them as-is; scrambled VOB sectors
+	// get decrypted with the key fetched by the SEEK_KEY path.
 	if ((int)lba != css_pos)
 	{
-		if (p_seek(css, (int)lba, DVDCSS_SEEK_MPEG) < 0)
+		if (p_seek(css, (int)lba, DVDCSS_SEEK_KEY) < 0)
 		{
-			static int seekfail_n = 0;
-			if (seekfail_n < 10) { seekfail_n++; css_log("seek %u failed: %s", lba, p_error ? p_error(css) : "?"); }
-			css_pos = -1;
-			return -1;
+			if (p_seek(css, (int)lba, DVDCSS_NOFLAGS) < 0)
+			{
+				static int seekfail_n = 0;
+				if (seekfail_n < 10) { seekfail_n++; css_log("seek %u failed: %s", lba, p_error ? p_error(css) : "?"); }
+				css_pos = -1;
+				return -1;
+			}
 		}
 	}
 
