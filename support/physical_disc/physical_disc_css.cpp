@@ -240,12 +240,17 @@ int physical_disc_css_read(void *buf, uint32_t lba, uint32_t count)
 				css_pos = -1;
 				return -1;
 			}
+			// SEEK_KEY failed but plain seek worked: no title key for this sector.
+			// Expected for the filesystem/IFO area (low LBAs); a problem if it
+			// happens on the content VOBs (high LBAs) -> those stay scrambled.
+			static int nokey = 0;
+			if (nokey < 30 && lba > 256) { nokey++; css_log("NO KEY at lba=%u (plain read -> scrambled if VOB)", lba); }
 		}
 		else
 		{
 			// SEEK_KEY succeeded -> a title key was obtained for this region.
 			static int keylog = 0;
-			if (keylog < 12) { keylog++; css_log("title key OK at lba=%u", lba); }
+			if (keylog < 30) { keylog++; css_log("title key OK at lba=%u", lba); }
 		}
 	}
 
