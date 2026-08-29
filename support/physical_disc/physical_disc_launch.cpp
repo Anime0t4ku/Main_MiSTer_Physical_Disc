@@ -313,6 +313,7 @@ static const char *menu_mgl_for_disc(physical_disc_disc_t type)
 	case PHYSICAL_DISC_DISC_3DO: return "3DO.mgl";
 	case PHYSICAL_DISC_DISC_CDI: return "CDi.mgl";
 	case PHYSICAL_DISC_DISC_SNES: return "SNES-MSU1.mgl";
+	case PHYSICAL_DISC_DISC_DVD: return "DVD.mgl";
 	case PHYSICAL_DISC_DISC_AUDIO: return menu_audio_mgl();
 	default: return NULL;
 	}

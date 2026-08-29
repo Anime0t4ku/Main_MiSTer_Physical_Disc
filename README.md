@@ -78,14 +78,21 @@ They are also useful for Audio CDs, as you can simply launch the MGL for the cor
 
 ## Playing DVD-Video discs (DVD core)
 
-Physical DVD movies play on the **DVD** core: insert the disc and open the DVD core — data
-(unencrypted) discs work as-is.
+Physical DVD movies play on the **DVD** core, the same way as the console cores:
+
+- **Manual:** insert the disc, open **`_Physical Disc Cores`**, and pick **DVD** — the core
+  loads and the disc mounts automatically.
+- **Auto Disc Detection** (if enabled): insert a DVD-Video disc and the DVD core launches on
+  its own.
+
+Both need a **`DVD.mgl`** launcher in `/media/fat/_Physical Disc Cores/` pointing at your DVD
+core `.rbf`. A template is provided at `support/physical_disc/DVD.mgl` — copy it there and set
+its `<rbf>` path to where your DVD core lives (e.g. `_Console/DVD`).
 
 Most retail DVDs are encrypted (CSS). To play those, install the DVD decryption library once:
 
 1. Run **`install_dvdcss`** from the MiSTer **Scripts** menu.
-2. Insert the disc.
-3. Open the DVD core.
+2. Insert the disc and launch the DVD core (either way above).
 
 That's it — encrypted discs now play. If an encrypted disc doesn't start (black screen, or a
 **`CSS ENCRYPTED`** message), the library isn't installed yet — run the script above. (The
