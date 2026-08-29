@@ -179,6 +179,66 @@ static int raw_read10(int fd, uint32_t lba, void *buf, int count)
 	return count;
 }
 
+// --- DIAGNOSTIC: does this drive answer raw CSS key commands over SG_IO? ---
+// libdvdcss does CSS auth via the /dev/sr DVD_AUTH ioctls, which often don't work
+// through usb-storage. This probes the SG_IO REPORT KEY (0xA4) path directly.
+static int report_key(int fd, int key_format, uint32_t lba, uint8_t agid, uint8_t *buf, int len)
+{
+	uint8_t cdb[12] = { 0xA4, 0,
+		(uint8_t)(lba >> 24), (uint8_t)(lba >> 16), (uint8_t)(lba >> 8), (uint8_t)lba,
+		0, 0, (uint8_t)(len >> 8), (uint8_t)len, (uint8_t)((agid << 6) | (key_format & 0x3f)), 0 };
+	uint8_t sense[32];
+	struct sg_io_hdr io;
+	memset(&io, 0, sizeof(io));
+	io.interface_id = 'S';
+	io.dxfer_direction = len ? SG_DXFER_FROM_DEV : SG_DXFER_NONE;
+	io.cmd_len = sizeof(cdb);
+	io.cmdp = cdb;
+	io.dxfer_len = len;
+	io.dxferp = len ? buf : NULL;
+	io.sbp = sense;
+	io.mx_sb_len = sizeof(sense);
+	io.timeout = 5000;
+	if (len) memset(buf, 0, len);
+	if (ioctl(fd, SG_IO, &io) < 0) return -2;                       // SG_IO not available
+	if (io.status || io.host_status)
+	{
+		// surface a couple of sense bytes to tell "unsupported" from "not ready"
+		css_log("  (report_key fmt=0x%02x scsi_status=0x%02x sense=%02x/%02x)",
+		        key_format, io.status, sense[2] & 0x0f, sense[12]);
+		return io.status ? io.status : -1;
+	}
+	return 0;
+}
+
+static void css_probe_drive_keys(const char *dev)
+{
+	int fd = open(dev, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+	if (fd < 0) { css_log("probe: cannot open %s", dev); return; }
+
+	uint8_t buf[8];
+	// 1) RPC / region state (format 0x08) — a non-intrusive status read.
+	if (report_key(fd, 0x08, 0, 0, buf, 8) == 0)
+		css_log("probe: RPC state OK (SG_IO key cmds work): type=%d region_mask=0x%02x scheme=%d",
+		        buf[4] >> 6, buf[5], buf[6]);
+	else
+		css_log("probe: REPORT KEY(RPC state) rejected — drive won't do key cmds over SG_IO");
+
+	// 2) Request a CSS AGID (format 0x00) — the first step of CSS authentication.
+	if (report_key(fd, 0x00, 0, 0, buf, 8) == 0)
+	{
+		uint8_t agid = buf[7] >> 6;
+		css_log("probe: CSS AGID granted (%d) — SG_IO CSS auth is VIABLE", agid);
+		report_key(fd, 0x3f, 0, agid, buf, 0);   // invalidate the AGID we took
+	}
+	else
+	{
+		css_log("probe: CSS AGID request rejected — no SG_IO CSS auth on this drive");
+	}
+
+	close(fd);
+}
+
 // Read `count` raw (undecrypted) 2048-byte sectors at `lba` — for the unscrambled
 // ISO9660 metadata used to enumerate VOB files. Returns sectors read or -1.
 static int css_raw_read(uint32_t lba, void *buf, int count)
@@ -323,6 +383,8 @@ int dvd_css_open(void)
 		css_log("no readable disc in an optical drive");
 		return 0;
 	}
+
+	css_probe_drive_keys(dev);   // DIAGNOSTIC: SG_IO CSS key-command support
 
 	if (load_library())
 	{
