@@ -3166,18 +3166,6 @@ void user_io_poll()
 	// is being updated and getting a corrupted image.
 	add_frame_callback(screenshot_cb);
 
-	if (is_dvd())
-	{
-		static int poll_ct_logged = 0;
-		if (!poll_ct_logged)
-		{
-			poll_ct_logged = 1;
-			dvd_css_diag("user_io_poll: core_type=0x%02x (8BIT=0x%02x SHARPMZ=0x%02x) early_return=%d",
-				core_type, CORE_TYPE_8BIT, CORE_TYPE_SHARPMZ,
-				(int)(core_type != CORE_TYPE_SHARPMZ && core_type != CORE_TYPE_8BIT));
-		}
-	}
-
 	if ((core_type != CORE_TYPE_SHARPMZ) &&
 		(core_type != CORE_TYPE_8BIT))
 	{
@@ -3227,17 +3215,6 @@ void user_io_poll()
 
 	snes_cd_session_poll();
 	mdplus_cd_session_poll();
-
-	if (is_dvd())
-	{
-		static int ct_logged = 0;
-		if (!ct_logged)
-		{
-			ct_logged = 1;
-			dvd_css_diag("poll: core_type=0x%02x CORE_8BIT=0x%02x is_menu=%d is_minimig=%d x86=%d",
-				core_type, CORE_TYPE_8BIT, is_menu(), is_minimig(), (int)(is_x86() || is_pcxt()));
-		}
-	}
 
 	if (is_x86() || is_pcxt())
 	{
@@ -3334,16 +3311,6 @@ void user_io_poll()
 				blks = 1;
 			}
 			DisableIO();
-			if (is_dvd() && disk >= 0 && op != 0)   // only real I/O, not idle polls
-			{
-				static int dvd_diag_n = 0;
-				if (dvd_diag_n < 60)
-				{
-					dvd_diag_n++;
-					dvd_css_diag("REQ disk=%d op=%d lba=%llu blksz=%u blks=%u sdtype=%d",
-						disk, op, (unsigned long long)lba, blksz, blks, sd_type[disk]);
-				}
-			}
 			if ( sd_type[disk] == SD_TYPE_A2)
 			{
 				//if (op) printf("A2 %x %llu on %d\n", op,lba, disk);

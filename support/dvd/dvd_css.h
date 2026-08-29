@@ -32,8 +32,4 @@ int dvd_css_read(void *buf, uint32_t lba, uint32_t count);
 
 void dvd_css_close(void);
 
-// Append a diagnostic line to the CSS log (/tmp/dvdcss.log) + stdout. Lets other
-// modules (e.g. the sd block-read loop) record what they see, for debugging.
-void dvd_css_diag(const char *fmt, ...);
-
 #endif

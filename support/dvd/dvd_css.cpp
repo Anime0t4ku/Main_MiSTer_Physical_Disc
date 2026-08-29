@@ -19,22 +19,10 @@
 
 #include "dvd_css.h"
 
-// Log to stdout AND to a file, so the reason for a failed mount is visible over
-// SSH regardless of which (possibly supervised) MiSTer instance handled it.
+// Status logging: to stdout and to /tmp/dvdcss.log (the latter so the reason for
+// a failed mount is visible over SSH, where the core's stdout is not).
 #define CSS_LOG_PATH "/tmp/dvdcss.log"
 static void css_log(const char *fmt, ...)
-{
-	char buf[256];
-	va_list ap;
-	va_start(ap, fmt);
-	vsnprintf(buf, sizeof(buf), fmt, ap);
-	va_end(ap);
-	printf("CSS: %s\n", buf);
-	FILE *f = fopen(CSS_LOG_PATH, "a");
-	if (f) { fprintf(f, "%s\n", buf); fclose(f); }
-}
-
-void dvd_css_diag(const char *fmt, ...)
 {
 	char buf[256];
 	va_list ap;
@@ -89,12 +77,7 @@ static int load_library(void)
 	for (int i = 0; css_lib_names[i]; i++)
 	{
 		css_lib = dlopen(css_lib_names[i], RTLD_NOW | RTLD_LOCAL);
-		if (css_lib)
-		{
-			css_log("loaded %s", css_lib_names[i]);
-			break;
-		}
-		css_log("dlopen(%s): %s", css_lib_names[i], dlerror());
+		if (css_lib) break;
 	}
 	if (!css_lib)
 	{
@@ -140,9 +123,6 @@ static int find_dvd_device(char *out, int outsz)
 		if (ioctl(fd, BLKGETSIZE64, &bytes) < 0) bytes = 0;
 		close(fd);
 
-		css_log("scan %s: drive_status=%d size=%lluMB", path, status,
-		        (unsigned long long)(bytes >> 20));
-
 		if (status == CDS_DISC_OK)
 		{
 			css_size = bytes;
@@ -156,9 +136,8 @@ static int find_dvd_device(char *out, int outsz)
 		}
 	}
 
-	if (fallback[0])
+	if (fallback[0])   // disc present but still spinning up -> let dvdcss_open wait
 	{
-		css_log("no ready disc; trying not-ready %s (spinning up)", fallback);
 		css_size = fb_size;
 		snprintf(out, outsz, "%s", fallback);
 		return 1;
@@ -289,20 +268,18 @@ static void build_vob_list(void)
 		return;
 	}
 	collect_vobs(vts_lba, vts_len);
-	css_log("vobs: found %d VOB(s)", g_nvobs);
 
 	// Pre-crack each VOB's title key at its start sector (the reliable position).
 	int keyed = 0;
 	for (int i = 0; i < g_nvobs; i++)
 		if (p_seek(css, (int)g_vobs[i].start, DVDCSS_SEEK_KEY) >= 0) keyed++;
-	css_log("vobs: keyed %d/%d", keyed, g_nvobs);
+	css_log("%d VOBs, %d title keys", g_nvobs, keyed);
 	css_pos = -1;
 }
 
 int dvd_css_open(void)
 {
 	if (css) return 1;
-	css_log("open: begin");
 	if (!load_library()) return 0;
 
 	char dev[32];
@@ -314,7 +291,7 @@ int dvd_css_open(void)
 
 	// USB optical bridges usually don't pass the CSS key ioctls, so force libdvdcss
 	// to CRACK the title keys from the data. The crack is only reliable at a VOB
-	// START, so precrack_title_keys() below seeks there for every VOB (like
+	// START, so build_vob_list() below seeks there for every VOB (like
 	// libdvdread's css_title at dvd_file->lb_start); reads then just decrypt.
 	setenv("DVDCSS_METHOD", "title", 1);
 
@@ -412,25 +389,11 @@ int dvd_css_read(void *buf, uint32_t lba, uint32_t count)
 	}
 
 	css_pos = (int)(lba + n);
-
-	// --- diagnostics: confirm the core is reading, and that the data looks like a
-	// filesystem. The ISO9660 primary volume descriptor lives at sector 16 with
-	// "CD001" at byte offset 1; UDF anchor is at sector 256. ---
-	static unsigned long nreads = 0;
-	nreads++;
-	if (nreads == 1) css_log("first read ok: lba=%u count=%u n=%d", lba, count, n);
-	if (lba <= 16 && (uint32_t)(lba + n) > 16)
-	{
-		const unsigned char *p = (const unsigned char *)buf + (16 - lba) * 2048;
-		css_log("LBA16 type=%02x sig=%c%c%c%c%c", p[0], p[1], p[2], p[3], p[4], p[5]);
-	}
-	if ((nreads % 4096) == 0) css_log("progress: reads=%lu last_lba=%u", nreads, lba);
 	return n;
 }
 
 void dvd_css_close(void)
 {
-	css_log("close called (css=%p)", (void *)css);
 	if (css && p_close) p_close(css);
 	css = NULL;
 	css_pos = -1;
