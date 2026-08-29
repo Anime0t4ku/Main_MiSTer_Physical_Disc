@@ -3264,11 +3264,6 @@ void user_io_poll()
 			}
 
 			uint16_t c = spi_uio_cmd_cont(UIO_GET_SDSTAT);
-			if (is_dvd() && (c & 0x8000))
-			{
-				static int sd_diag_n = 0;
-				if (sd_diag_n < 40) { sd_diag_n++; physical_disc_css_diag("sdstat c=%04x", c); }
-			}
 			if (c & 0x8000)
 			{
 				disk = (c >> 2) & 0xF;
@@ -3338,10 +3333,10 @@ void user_io_poll()
 				blks = 1;
 			}
 			DisableIO();
-			if (is_dvd() && disk >= 0)
+			if (is_dvd() && disk >= 0 && op != 0)   // only real I/O, not idle polls
 			{
 				static int dvd_diag_n = 0;
-				if (dvd_diag_n < 40)
+				if (dvd_diag_n < 60)
 				{
 					dvd_diag_n++;
 					physical_disc_css_diag("REQ disk=%d op=%d lba=%llu blksz=%u blks=%u sdtype=%d",
