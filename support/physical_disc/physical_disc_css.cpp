@@ -178,10 +178,11 @@ int physical_disc_css_open(void)
 		return 0;
 	}
 
-	// USB optical bridges usually don't pass the CSS key ioctls, so the default
-	// (player-key/ioctl) method can't get title keys. Force libdvdcss to CRACK the
-	// title keys from the scrambled data itself — works on any drive, no ioctls.
-	setenv("DVDCSS_METHOD", "title", 1);
+	// USB optical bridges usually don't pass the CSS key ioctls. DVDCSS_METHOD=disc
+	// cracks the DISC key once and derives each title key from the stream, which
+	// (unlike the per-title statistical crack) does not depend on seeking to a
+	// VOB start — better suited to the core's random-access read pattern.
+	setenv("DVDCSS_METHOD", "disc", 1);
 
 	css = p_open(dev);
 	if (!css)
