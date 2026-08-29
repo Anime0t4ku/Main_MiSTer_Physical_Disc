@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <dlfcn.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <scsi/sg.h>
 #include <linux/cdrom.h>
 #include <linux/fs.h>
@@ -332,6 +333,12 @@ int dvd_css_open(void)
 		// key is fetched at the VOB START (build_vob_list below), where both paths
 		// are reliable. (We used to force DVDCSS_METHOD=title, i.e. always crack;
 		// that predates seeking at the VOB start and was needlessly slow.)
+
+		// Persist keys per disc: a slow crack becomes a one-time cost, and
+		// re-inserting the same disc reads the keys back instantly.
+		mkdir("/media/fat/dvdcss/cache", 0755);
+		setenv("DVDCSS_CACHE", "/media/fat/dvdcss/cache", 1);
+
 		css = p_open(dev);
 		if (!css)
 		{
