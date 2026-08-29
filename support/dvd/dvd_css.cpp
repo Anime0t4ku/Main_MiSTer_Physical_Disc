@@ -434,7 +434,14 @@ int dvd_css_open(void)
 		if (disc_is_encrypted(dev))
 		{
 			css_log("encrypted disc but no libdvdcss — run install_dvdcss");
-			InfoMessage("Encrypted DVD\n\nRun install_dvdcss", 8000, "DVD");
+			// A single InfoMessage() is cleared the instant the core finishes
+			// loading — too fast to read. Re-assert it for a few seconds (as the
+			// crack progress loop does) so it stays up before the core goes black.
+			for (int t = 0; t < 45; t++)
+			{
+				InfoMessage("Encrypted DVD\n\nRun install_dvdcss", 3000, "DVD");
+				usleep(100000);   // ~4.5 s total
+			}
 		}
 		raw_fd = open(dev, O_RDONLY | O_CLOEXEC);
 		if (raw_fd < 0)
