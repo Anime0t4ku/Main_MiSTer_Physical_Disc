@@ -325,11 +325,13 @@ int dvd_css_open(void)
 
 	if (load_library())
 	{
-		// USB optical bridges usually don't pass the CSS key ioctls, so force
-		// libdvdcss to CRACK the title keys from the data. The crack is only
-		// reliable at a VOB START, so build_vob_list() below seeks there for every
-		// VOB (like libdvdread's css_title at dvd_file->lb_start); reads then decrypt.
-		setenv("DVDCSS_METHOD", "title", 1);
+		// Use libdvdcss's default method: fetch each title key from the DRIVE via
+		// the CSS key ioctls (fast — a REPORT KEY per title) when the drive
+		// supports them, and fall back to CRACKING the key from the data only when
+		// it doesn't (the crack can be slow, minutes on some discs). Either way the
+		// key is fetched at the VOB START (build_vob_list below), where both paths
+		// are reliable. (We used to force DVDCSS_METHOD=title, i.e. always crack;
+		// that predates seeking at the VOB start and was needlessly slow.)
 		css = p_open(dev);
 		if (!css)
 		{
