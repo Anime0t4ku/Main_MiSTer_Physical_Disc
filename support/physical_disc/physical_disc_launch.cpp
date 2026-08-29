@@ -2,8 +2,12 @@
 #include <string.h>
 #include <strings.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 
 #include "../../user_io.h"
+#include "../../bootcore.h"
+#include "../../fpga_io.h"
 #include "../../menu.h"
 #include "../../cfg.h"
 #include "../../hardware.h"
@@ -49,6 +53,70 @@ static int menu_discovery_suspended = 0;
 #define PHYSICAL_DISC_HANDLED_FILE "/tmp/physical_disc_menu_handled"
 #define PHYSICAL_DISC_MGL_DIR "/media/fat/_Physical Disc Cores"
 #define MISTER_HIFI_SCRIPT "/media/fat/Scripts/misterhifi.sh"
+#define PHYSICAL_DISC_DVD_MOUNT "/tmp/physical_disc_dvd"
+#define DVD_PLAYER_RBF "DVD_Player.rbf"
+
+static int run_quiet(const char *program, const char *arg1, const char *arg2,
+	const char *arg3, const char *arg4)
+{
+	pid_t pid = fork();
+	if (pid < 0) return 0;
+	if (!pid)
+	{
+		freopen("/dev/null", "w", stdout);
+		freopen("/dev/null", "w", stderr);
+		execlp(program, program, arg1, arg2, arg3, arg4, (char *)NULL);
+		_exit(127);
+	}
+
+	int status = 0;
+	while (waitpid(pid, &status, 0) < 0) {}
+	return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static int menu_is_dvd_video(void)
+{
+	// Avoid mounting every game CD merely to rule out DVD-Video.
+	if (!physical_disc_is_dvd_media()) return 0;
+
+	const char *active_device = physical_disc_device();
+	if (!active_device || !*active_device) return 0;
+	char device[64];
+	snprintf(device, sizeof(device), "%s", active_device);
+
+	// DVD-Video detection is deliberately limited to a temporary read-only
+	// mount. Playback and all other DVD drive handling belong to DVD_Player.
+	mkdir(PHYSICAL_DISC_DVD_MOUNT, 0755);
+	run_quiet("umount", PHYSICAL_DISC_DVD_MOUNT, NULL, NULL, NULL);
+	physical_disc_close();
+	if (!run_quiet("mount", "-o", "ro", device, PHYSICAL_DISC_DVD_MOUNT)) return 0;
+
+	char path[512];
+	snprintf(path, sizeof(path), "%s/VIDEO_TS/VIDEO_TS.IFO", PHYSICAL_DISC_DVD_MOUNT);
+	int is_dvd = FileExists(path);
+	if (!is_dvd)
+	{
+		snprintf(path, sizeof(path), "%s/video_ts/video_ts.ifo", PHYSICAL_DISC_DVD_MOUNT);
+		is_dvd = FileExists(path);
+	}
+	run_quiet("umount", PHYSICAL_DISC_DVD_MOUNT, NULL, NULL, NULL);
+	return is_dvd;
+}
+
+static int menu_launch_dvd_player(void)
+{
+	char path[512];
+	if (!find_core_rbf(DVD_PLAYER_RBF, path, sizeof(path)))
+	{
+		printf("DISC: DVD-Video detected but %s was not found\n", DVD_PLAYER_RBF);
+		Info("DVD Player core not found", 5000);
+		return 0;
+	}
+
+	printf("DISC: DVD-Video detected, launching %s\n", path);
+	fpga_load_rbf(path);
+	return 1;
+}
 
 static int sector_has_data(const uint8_t *data)
 {
@@ -448,6 +516,29 @@ int physical_disc_launch_menu_tick(void)
 			printf("DISC: startup disc removed, Auto Disc Discovery armed\n");
 		}
 		physical_disc_close();
+		menu_detecting = 0;
+		return 0;
+	}
+
+	// DVDs do not expose the CD-style TOC used by the existing console-disc
+	// detector. Recognize DVD-Video before entering that CD-only path.
+	if (disc_present && menu_is_dvd_video())
+	{
+		const unsigned int dvd_fingerprint = 0x44564456u; // "DVDV"
+		if (menu_read_handled() == dvd_fingerprint)
+		{
+			menu_detecting = 0;
+			return 0;
+		}
+		menu_write_handled(dvd_fingerprint);
+		menu_detecting = 0;
+		return menu_launch_dvd_player();
+	}
+
+	// DVD probing closes the drive before mounting it. Re-open it for the
+	// existing CD identification path when the inserted disc wasn't DVD-Video.
+	if (physical_disc_open(NULL))
+	{
 		menu_detecting = 0;
 		return 0;
 	}

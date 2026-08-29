@@ -719,10 +719,25 @@ int physical_disc_open(const char *dev)
 	return 0;
 }
 
+const char *physical_disc_device(void)
+{
+	return active_dev;
+}
+
 int physical_disc_disc_present()
 {
 	if (drv.dev_fd < 0) return 0;
 	return ioctl(drv.dev_fd, CDROM_DRIVE_STATUS, CDSL_CURRENT) == CDS_DISC_OK;
+}
+
+int physical_disc_is_dvd_media(void)
+{
+	if (drv.dev_fd < 0 || !physical_disc_disc_present()) return 0;
+	dvd_struct info;
+	memset(&info, 0, sizeof(info));
+	info.type = DVD_STRUCT_PHYSICAL;
+	info.physical.layer_num = 0;
+	return ioctl(drv.dev_fd, DVD_READ_STRUCT, &info) == 0;
 }
 
 int physical_disc_media_changed()

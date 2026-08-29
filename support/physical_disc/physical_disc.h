@@ -47,10 +47,12 @@ void physical_disc_set_device(const char *dev);
 
 
 int physical_disc_open(const char *dev);
+const char *physical_disc_device(void);
 void physical_disc_native_speed(int enable);
 
 
 int physical_disc_disc_present();
+int physical_disc_is_dvd_media(void);
 
 
 int physical_disc_media_changed();
