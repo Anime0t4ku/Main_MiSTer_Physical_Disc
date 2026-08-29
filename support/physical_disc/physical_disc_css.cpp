@@ -33,6 +33,18 @@ static void css_log(const char *fmt, ...)
 	if (f) { fprintf(f, "%s\n", buf); fclose(f); }
 }
 
+void physical_disc_css_diag(const char *fmt, ...)
+{
+	char buf[256];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, ap);
+	va_end(ap);
+	printf("CSS: %s\n", buf);
+	FILE *f = fopen(CSS_LOG_PATH, "a");
+	if (f) { fprintf(f, "%s\n", buf); fclose(f); }
+}
+
 // --- libdvdcss API (from dvdcss.h; reproduced so we need no external headers) ---
 typedef struct dvdcss_s *dvdcss_t;
 #define DVDCSS_READ_DECRYPT (1 << 0)

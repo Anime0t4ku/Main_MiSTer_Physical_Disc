@@ -3310,6 +3310,16 @@ void user_io_poll()
 				blks = 1;
 			}
 			DisableIO();
+			if (is_dvd() && disk >= 0)
+			{
+				static int dvd_diag_n = 0;
+				if (dvd_diag_n < 40)
+				{
+					dvd_diag_n++;
+					physical_disc_css_diag("REQ disk=%d op=%d lba=%llu blksz=%u blks=%u sdtype=%d",
+						disk, op, (unsigned long long)lba, blksz, blks, sd_type[disk]);
+				}
+			}
 			if ( sd_type[disk] == SD_TYPE_A2)
 			{
 				//if (op) printf("A2 %x %llu on %d\n", op,lba, disk);
