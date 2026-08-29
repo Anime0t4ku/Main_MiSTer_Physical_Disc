@@ -2121,8 +2121,10 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 			{
 				// Physical DVD-Video: no file to open. libdvdcss (user-supplied)
 				// serves CSS-decrypted 2048-byte sectors; the slot is drive-backed
-				// and read-only. If libdvdcss is absent this fails and the mount is
-				// rejected (the user is told to run Scripts/install_dvdcss).
+				// and read-only. Without libdvdcss it falls back to raw reads, so
+				// unencrypted discs still play; an encrypted disc gets the on-screen
+				// "run install_dvdcss" popup. The mount is only rejected when there
+				// is no readable disc in the drive at all.
 				if (dvd_css_open())
 				{
 					sd_type[index] = SD_TYPE_DVDCSS;

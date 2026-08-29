@@ -240,12 +240,9 @@ static int disc_is_encrypted(const char *dev)
 	io.mx_sb_len = sizeof(sense);
 	io.timeout = 5000;
 
-	int rc = ioctl(fd, SG_IO, &io);
-	int css = (rc == 0 && io.status == 0) ? (buf[4] != 0) : 0;
-	css_log("copyright probe: rc=%d status=0x%02x CPST=0x%02x -> %s",
-	        rc, io.status, buf[4], css ? "CSS" : "none/unknown");
+	int css = (ioctl(fd, SG_IO, &io) == 0 && io.status == 0) ? (buf[4] != 0) : 0;
 	close(fd);
-	return css;
+	return css;   // caller logs the outcome (the encrypted-without-libdvdcss case)
 }
 
 // Read `count` raw (undecrypted) 2048-byte sectors at `lba` — for the unscrambled
