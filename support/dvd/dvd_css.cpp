@@ -239,6 +239,41 @@ static void css_probe_drive_keys(const char *dev)
 	close(fd);
 }
 
+// Probe the /dev/sr DVD_AUTH ioctl path — the one libdvdcss actually uses. If
+// this fails while the SG_IO probe above succeeds, that's the smoking gun:
+// libdvdcss can't authenticate on this drive/kernel and falls back to cracking.
+static void css_probe_dvdauth(const char *dev)
+{
+	int fd = open(dev, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+	if (fd < 0) return;
+
+	dvd_authinfo ai;
+	memset(&ai, 0, sizeof(ai));
+	ai.type = DVD_LU_SEND_RPC_STATE;
+	if (ioctl(fd, DVD_AUTH, &ai) == 0)
+		css_log("probe: DVD_AUTH RPC state OK — libdvdcss's ioctl path works here");
+	else
+		css_log("probe: DVD_AUTH RPC state FAILED (%s) — libdvdcss's ioctl path is broken", strerror(errno));
+
+	memset(&ai, 0, sizeof(ai));
+	ai.type = DVD_LU_SEND_AGID;
+	if (ioctl(fd, DVD_AUTH, &ai) == 0)
+	{
+		uint8_t agid = ai.lsa.agid;
+		css_log("probe: DVD_AUTH AGID granted (%d) — libdvdcss SHOULD authenticate via ioctl", agid);
+		memset(&ai, 0, sizeof(ai));
+		ai.type = DVD_INVALIDATE_AGID;
+		ai.lsa.agid = agid;
+		ioctl(fd, DVD_AUTH, &ai);
+	}
+	else
+	{
+		css_log("probe: DVD_AUTH AGID FAILED (%s) — libdvdcss can't auth via ioctl (SG_IO is the way)", strerror(errno));
+	}
+
+	close(fd);
+}
+
 // Read `count` raw (undecrypted) 2048-byte sectors at `lba` — for the unscrambled
 // ISO9660 metadata used to enumerate VOB files. Returns sectors read or -1.
 static int css_raw_read(uint32_t lba, void *buf, int count)
@@ -385,6 +420,7 @@ int dvd_css_open(void)
 	}
 
 	css_probe_drive_keys(dev);   // DIAGNOSTIC: SG_IO CSS key-command support
+	css_probe_dvdauth(dev);      // DIAGNOSTIC: the /dev/sr DVD_AUTH path libdvdcss uses
 
 	if (load_library())
 	{
