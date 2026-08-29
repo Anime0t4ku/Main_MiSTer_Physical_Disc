@@ -408,6 +408,22 @@ static void build_vob_list(void)
 	css_pos = -1;
 }
 
+// DIAGNOSTIC: capture libdvdcss's own verbose output (it logs to stderr) during
+// the auth/key phase, so we can see exactly where its authentication gives up.
+static int g_verbose_saved = -1;
+static void css_verbose_begin(void)
+{
+	setenv("DVDCSS_VERBOSE", "2", 1);
+	g_verbose_saved = dup(2);
+	int vfd = open("/tmp/dvdcss_verbose.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (vfd >= 0) { dup2(vfd, 2); close(vfd); }
+}
+static void css_verbose_end(void)
+{
+	fflush(stderr);
+	if (g_verbose_saved >= 0) { dup2(g_verbose_saved, 2); close(g_verbose_saved); g_verbose_saved = -1; }
+}
+
 int dvd_css_open(void)
 {
 	if (css || raw_fd >= 0) return 1;
@@ -437,9 +453,11 @@ int dvd_css_open(void)
 		mkdir("/media/fat/dvdcss/cache", 0755);
 		setenv("DVDCSS_CACHE", "/media/fat/dvdcss/cache", 1);
 
+		css_verbose_begin();
 		css = p_open(dev);
 		if (!css)
 		{
+			css_verbose_end();
 			css_log("dvdcss_open(%s) failed", dev);
 			return 0;
 		}
@@ -475,6 +493,7 @@ int dvd_css_open(void)
 
 	// Discover the VOB layout and pre-crack every title key at its VOB start.
 	if (css) build_vob_list();
+	css_verbose_end();
 	return 1;
 }
 
