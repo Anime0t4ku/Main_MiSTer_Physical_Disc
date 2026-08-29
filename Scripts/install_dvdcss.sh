@@ -20,12 +20,14 @@ DEST_DIR="${DVDCSS_DEST_DIR:-/media/fat/dvdcss}"
 DEST="$DEST_DIR/libdvdcss.so.2"
 TMP="/tmp/dvdcss_install.$$"
 
-# Third-party source: prebuilt armhf (glibc — correct ABI for MiSTer) libdvdcss2
-# from deb-multimedia. A few candidates cover version drift across their suites.
+# Third-party source: prebuilt armhf libdvdcss2 from deb-multimedia. MiSTer runs
+# an older glibc (~2.32), so we prefer OLDER-suite builds (bullseye needs only
+# GLIBC_2.7); newer builds (bookworm) require GLIBC_2.33+ and would not load. The
+# on-device load check below skips any candidate that is nonetheless too new.
 DEB_URLS="
+http://www.deb-multimedia.org/pool/main/libd/libdvdcss-dmo/libdvdcss2_1.4.3-dmo1_armhf.deb
 http://www.deb-multimedia.org/pool/main/libd/libdvdcss-dmo/libdvdcss2_1.4.3-dmo2_armhf.deb
 http://www.deb-multimedia.org/pool/main/libd/libdvdcss-dmo/libdvdcss2_1.4.3-dmo2+b1_armhf.deb
-http://www.deb-multimedia.org/pool/main/libd/libdvdcss-dmo/libdvdcss2_1.4.3-dmo1_armhf.deb
 "
 
 say()  { echo "dvdcss: $*"; }
@@ -47,6 +49,29 @@ verify_so() { # path
 		7f454c46*) fail "downloaded library is an ELF but not 32-bit ARM"; return 1 ;;
 		*) fail "downloaded file is not a library (bad download?)"; return 1 ;;
 	esac
+}
+
+# Actually dlopen the library on THIS system, but only REJECT it when the failure
+# is specifically a glibc-version mismatch (a too-new build). Any other outcome —
+# it loads, ctypes is missing, some unrelated error — is treated as "ok/can't
+# tell" so a genuinely fine library is never blocked.
+verify_loadable() { # path -> nonzero only on a confirmed glibc mismatch
+	command -v python3 >/dev/null 2>&1 || return 0
+	python3 - "$1" <<'PY'
+import sys
+try:
+    import ctypes, os
+except Exception:
+    sys.exit(0)
+try:
+    ctypes.CDLL(sys.argv[1], mode=os.RTLD_NOW)
+    sys.exit(0)
+except OSError as e:
+    m = str(e)
+    sys.exit(1 if ("GLIBC_" in m or "version `" in m) else 0)
+except Exception:
+    sys.exit(0)
+PY
 }
 
 # Extract usr/lib/.../libdvdcss.so.2* out of a Debian .deb using only python3's
@@ -102,11 +127,13 @@ mkdir -p "$DEST_DIR" "$TMP" || { fail "cannot create $DEST_DIR"; exit 1; }
 # 1) A direct .so link (user-provided) is the simplest, most reliable path.
 if [ "${DVDCSS_URL:-}" != "" ] && printf '%s' "$DVDCSS_URL" | grep -qiE '\.so(\.[0-9]+)*$'; then
 	say "downloading library from DVDCSS_URL..."
-	if fetch "$DVDCSS_URL" "$DEST" && verify_so "$DEST"; then
+	if fetch "$DVDCSS_URL" "$DEST" && verify_so "$DEST" && verify_loadable "$DEST"; then
 		chmod 0644 "$DEST"; rm -rf "$TMP"
 		say "installed $DEST"; say "done — insert a disc and open the DVD core."; exit 0
 	fi
-	fail "could not install from DVDCSS_URL"; rm -rf "$TMP"; exit 1
+	rm -f "$DEST"
+	fail "could not install from DVDCSS_URL (download failed, or the library needs a newer glibc than this system)"
+	rm -rf "$TMP"; exit 1
 fi
 
 if ! command -v python3 >/dev/null 2>&1; then
@@ -123,10 +150,14 @@ for url in $urls; do
 	[ -n "$url" ] || continue
 	if fetch "$url" "$TMP/pkg.deb" && [ -s "$TMP/pkg.deb" ]; then
 		if extract_so "$TMP/pkg.deb" "$DEST" && verify_so "$DEST"; then
-			chmod 0644 "$DEST"; rm -rf "$TMP"
-			say "installed $DEST"
-			say "done — insert a disc and open the DVD core."
-			exit 0
+			if verify_loadable "$DEST"; then
+				chmod 0644 "$DEST"; rm -rf "$TMP"
+				say "installed $DEST"
+				say "done — insert a disc and open the DVD core."
+				exit 0
+			fi
+			say "that build needs a newer glibc than this system — trying an older one..."
+			rm -f "$DEST"
 		fi
 	fi
 done
