@@ -86,7 +86,7 @@ Physical DVD movies play on the **DVD** core, the same way as the console cores:
   its own.
 
 Both need a **`DVD.mgl`** launcher in `/media/fat/_Physical Disc Cores/` pointing at your DVD
-core `.rbf`. A template is provided at `support/physical_disc/DVD.mgl` — copy it there and set
+core `.rbf`. A template is provided at `support/dvd/DVD.mgl` — copy it there and set
 its `<rbf>` path to where your DVD core lives (e.g. `_Console/DVD`).
 
 Most retail DVDs are encrypted (CSS). To play those, install the DVD decryption library once:

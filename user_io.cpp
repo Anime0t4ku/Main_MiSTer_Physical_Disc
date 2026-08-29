@@ -35,7 +35,7 @@
 #include "ide.h"
 #include "ide_cdrom.h"
 #include "support/physical_disc/physical_disc.h"
-#include "support/physical_disc/dvd_css.h"
+#include "support/dvd/dvd_css.h"
 #ifdef PROFILING
 #include "profiling.h"
 #endif
