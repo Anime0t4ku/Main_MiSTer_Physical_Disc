@@ -19,6 +19,7 @@
 #include <linux/fs.h>
 
 #include "dvd_css.h"
+#include "../../menu.h"   // ProgressMessage() — on-screen feedback during key crack
 
 // Status logging: to stdout and to /tmp/dvdcss.log (the latter so the reason for
 // a failed mount is visible over SSH, where the core's stdout is not).
@@ -297,9 +298,16 @@ static void build_vob_list(void)
 	collect_vobs(vts_lba, vts_len);
 
 	// Pre-crack each VOB's title key at its start sector (the reliable position).
+	// This blocks the main loop for a few seconds, so show a progress bar (the
+	// crack would otherwise be an unexplained black screen).
+	ProgressMessage();   // reset so the first update renders
 	int keyed = 0;
 	for (int i = 0; i < g_nvobs; i++)
+	{
+		ProgressMessage("DVD", "Preparing disc", i, g_nvobs);
 		if (p_seek(css, (int)g_vobs[i].start, DVDCSS_SEEK_KEY) >= 0) keyed++;
+	}
+	ProgressMessage();   // clear
 	css_log("%d VOBs, %d title keys", g_nvobs, keyed);
 	css_pos = -1;
 }
