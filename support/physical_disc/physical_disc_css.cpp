@@ -5,6 +5,7 @@
 
 #include <stdio.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <errno.h>
@@ -177,6 +178,11 @@ int physical_disc_css_open(void)
 		return 0;
 	}
 
+	// USB optical bridges usually don't pass the CSS key ioctls, so the default
+	// (player-key/ioctl) method can't get title keys. Force libdvdcss to CRACK the
+	// title keys from the scrambled data itself — works on any drive, no ioctls.
+	setenv("DVDCSS_METHOD", "title", 1);
+
 	css = p_open(dev);
 	if (!css)
 	{
@@ -234,6 +240,12 @@ int physical_disc_css_read(void *buf, uint32_t lba, uint32_t count)
 				css_pos = -1;
 				return -1;
 			}
+		}
+		else
+		{
+			// SEEK_KEY succeeded -> a title key was obtained for this region.
+			static int keylog = 0;
+			if (keylog < 12) { keylog++; css_log("title key OK at lba=%u", lba); }
 		}
 	}
 
