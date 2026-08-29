@@ -77,10 +77,6 @@ The MGL files make it easy to manually select which Physical Disc core should be
 
 They are also useful for Audio CDs, as you can simply launch the MGL for the core you want to use.
 
-## DVD-Video discs
-
-Movie DVDs play on the **DVD** core, launched like any other Physical Disc core. Most retail DVDs are CSS-encrypted; to play those, run **`install_dvdcss`** from the Scripts menu once (it downloads libdvdcss, which is not bundled here). A **`CSS ENCRYPTED`** message means the library is not installed yet.
-
 ## Auto Disc Detection
 
 Auto Disc Detection is an optional extra feature that can automatically identify a newly inserted disc and launch the appropriate Physical Disc core.
@@ -192,6 +188,10 @@ The tutorial was written by **NinoPrime** and covers the process of preparing an
 > **Note:** The tutorial currently covers the process on **Windows only**.
 
 [Burning MSU-1 & MD+ CDs](assets/Burning%20MSU-1%20%26%20MD%2B%20CD%27s.docx)
+
+## DVD-Video discs
+
+Movie DVDs play on the **DVD** core, launched like any other Physical Disc core. Unencrypted DVDs need nothing extra. Most retail DVDs are CSS-encrypted; to play those, run **`install_dvdcss`** from the Scripts menu once (it downloads libdvdcss, which is not bundled here). A **`CSS ENCRYPTED`** message means the library is not installed yet.
 
 ## Updating
 

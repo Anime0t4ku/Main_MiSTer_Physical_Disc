@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <dlfcn.h>
 #include <sys/ioctl.h>
+#include <scsi/sg.h>
 #include <linux/cdrom.h>
 #include <linux/fs.h>
 
@@ -58,6 +59,7 @@ static dvdcss_t css = NULL;
 static uint64_t css_size = 0;   // bytes
 static int css_pos = -1;        // last block position, to avoid redundant seeks
 static int cur_vob = -1;        // VOB index whose title key is currently selected
+static int raw_fd = -1;         // raw drive fd when libdvdcss is absent (no decrypt)
 
 // Candidate locations for the user-supplied library. The install script drops it
 // at the first path; the sonames cover a lib already on the default search path.
@@ -148,6 +150,31 @@ static int find_dvd_device(char *out, int outsz)
 static inline uint32_t rd_le32(const uint8_t *p)
 {
 	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+// Raw READ(10) of `count` 2048-byte sectors at `lba` — used only in the no-
+// libdvdcss fallback, which plays unencrypted DVDs (CSS discs come back
+// scrambled and the core flags CSS ENCRYPTED). Returns sectors read or -1.
+static int raw_read10(int fd, uint32_t lba, void *buf, int count)
+{
+	uint8_t cdb[10] = { 0x28, 0,
+		(uint8_t)(lba >> 24), (uint8_t)(lba >> 16), (uint8_t)(lba >> 8), (uint8_t)lba,
+		0, (uint8_t)(count >> 8), (uint8_t)count, 0 };
+	uint8_t sense[32];
+	struct sg_io_hdr io;
+	memset(&io, 0, sizeof(io));
+	io.interface_id = 'S';
+	io.dxfer_direction = SG_DXFER_FROM_DEV;
+	io.cmd_len = sizeof(cdb);
+	io.cmdp = cdb;
+	io.dxfer_len = (unsigned)count * 2048;
+	io.dxferp = buf;
+	io.sbp = sense;
+	io.mx_sb_len = sizeof(sense);
+	io.timeout = 5000;
+	if (ioctl(fd, SG_IO, &io) < 0) return -1;
+	if (io.status || io.host_status) return -1;
+	return count;
 }
 
 // Read `count` raw (undecrypted) 2048-byte sectors at `lba` — for the unscrambled
@@ -279,8 +306,7 @@ static void build_vob_list(void)
 
 int dvd_css_open(void)
 {
-	if (css) return 1;
-	if (!load_library()) return 0;
+	if (css || raw_fd >= 0) return 1;
 
 	char dev[32];
 	if (!find_dvd_device(dev, sizeof(dev)))
@@ -289,17 +315,30 @@ int dvd_css_open(void)
 		return 0;
 	}
 
-	// USB optical bridges usually don't pass the CSS key ioctls, so force libdvdcss
-	// to CRACK the title keys from the data. The crack is only reliable at a VOB
-	// START, so build_vob_list() below seeks there for every VOB (like
-	// libdvdread's css_title at dvd_file->lb_start); reads then just decrypt.
-	setenv("DVDCSS_METHOD", "title", 1);
-
-	css = p_open(dev);
-	if (!css)
+	if (load_library())
 	{
-		css_log("dvdcss_open(%s) failed", dev);
-		return 0;
+		// USB optical bridges usually don't pass the CSS key ioctls, so force
+		// libdvdcss to CRACK the title keys from the data. The crack is only
+		// reliable at a VOB START, so build_vob_list() below seeks there for every
+		// VOB (like libdvdread's css_title at dvd_file->lb_start); reads then decrypt.
+		setenv("DVDCSS_METHOD", "title", 1);
+		css = p_open(dev);
+		if (!css)
+		{
+			css_log("dvdcss_open(%s) failed", dev);
+			return 0;
+		}
+	}
+	else
+	{
+		// No libdvdcss: raw fallback. Unencrypted DVDs play; CSS discs come back
+		// scrambled and the core shows CSS ENCRYPTED (run install_dvdcss then).
+		raw_fd = open(dev, O_RDONLY | O_CLOEXEC);
+		if (raw_fd < 0)
+		{
+			css_log("cannot open %s", dev);
+			return 0;
+		}
 	}
 
 	// If the size was not available at scan time (drive was still spinning up),
@@ -317,25 +356,26 @@ int dvd_css_open(void)
 
 	css_pos = -1;
 	css_log("opened %s (%llu MB)%s", dev, (unsigned long long)(css_size >> 20),
-	        css_size ? "" : "  <-- WARNING size 0, core will reject");
+	        css ? "" : " raw — no libdvdcss, unencrypted discs only");
 
 	// Discover the VOB layout and pre-crack every title key at its VOB start.
-	build_vob_list();
+	if (css) build_vob_list();
 	return 1;
 }
 
 int dvd_css_active(void)
 {
-	return css != NULL;
+	return css != NULL || raw_fd >= 0;
 }
 
 uint64_t dvd_css_size(void)
 {
-	return css ? css_size : 0;
+	return (css || raw_fd >= 0) ? css_size : 0;
 }
 
 int dvd_css_read(void *buf, uint32_t lba, uint32_t count)
 {
+	if (raw_fd >= 0) return raw_read10(raw_fd, lba, buf, (int)count);   // no-libdvdcss fallback
 	if (!css) return -1;
 
 	int vi = vob_index(lba);
@@ -395,7 +435,9 @@ int dvd_css_read(void *buf, uint32_t lba, uint32_t count)
 void dvd_css_close(void)
 {
 	if (css && p_close) p_close(css);
+	if (raw_fd >= 0) close(raw_fd);
 	css = NULL;
+	raw_fd = -1;
 	css_pos = -1;
 	cur_vob = -1;
 	g_nvobs = 0;
