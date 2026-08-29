@@ -225,6 +225,19 @@ int physical_disc_css_read(void *buf, uint32_t lba, uint32_t count)
 	}
 
 	css_pos = (int)(lba + n);
+
+	// --- diagnostics: confirm the core is reading, and that the data looks like a
+	// filesystem. The ISO9660 primary volume descriptor lives at sector 16 with
+	// "CD001" at byte offset 1; UDF anchor is at sector 256. ---
+	static unsigned long nreads = 0;
+	nreads++;
+	if (nreads == 1) css_log("first read ok: lba=%u count=%u n=%d", lba, count, n);
+	if (lba <= 16 && (uint32_t)(lba + n) > 16)
+	{
+		const unsigned char *p = (const unsigned char *)buf + (16 - lba) * 2048;
+		css_log("LBA16 type=%02x sig=%c%c%c%c%c", p[0], p[1], p[2], p[3], p[4], p[5]);
+	}
+	if ((nreads % 4096) == 0) css_log("progress: reads=%lu last_lba=%u", nreads, lba);
 	return n;
 }
 
