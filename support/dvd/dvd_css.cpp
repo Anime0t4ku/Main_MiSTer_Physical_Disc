@@ -453,6 +453,14 @@ int dvd_css_open(void)
 		mkdir("/media/fat/dvdcss/cache", 0755);
 		setenv("DVDCSS_CACHE", "/media/fat/dvdcss/cache", 1);
 
+		// This drive gates title-key retrieval on a region being set (it isn't),
+		// so the default drive-ioctl method falls back to the slow per-title crack.
+		// DVDCSS_METHOD=disc instead cracks the DISC key once (fast, using the auth
+		// the drive DOES grant) and DERIVES each title key from it — no region-gated
+		// drive key, no statistical title crack. (Re-testing now that we seek at the
+		// VOB start; the earlier disc-method try predated that fix.)
+		setenv("DVDCSS_METHOD", "disc", 1);
+
 		css_verbose_begin();
 		css = p_open(dev);
 		if (!css)
