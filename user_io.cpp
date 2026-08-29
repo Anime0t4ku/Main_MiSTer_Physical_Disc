@@ -3165,6 +3165,9 @@ void user_io_poll()
 	// is being updated and getting a corrupted image.
 	add_frame_callback(screenshot_cb);
 
+	// Surface a deferred DVD "install libdvdcss" popup once the launch settles.
+	dvd_css_tick();
+
 	if ((core_type != CORE_TYPE_SHARPMZ) &&
 		(core_type != CORE_TYPE_8BIT))
 	{

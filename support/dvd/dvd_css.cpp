@@ -12,6 +12,7 @@
 #include <limits.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <time.h>
 #include <dlfcn.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -65,6 +66,7 @@ static int css_pos = -1;        // last block position, to avoid redundant seeks
 static int cur_vob = -1;        // VOB index whose title key is currently selected
 static int raw_fd = -1;         // raw drive fd when libdvdcss is absent (no decrypt)
 static int region_set = 1;      // 0 if the drive has no CSS region set (keys will crack)
+static time_t warn_until = 0;   // deadline for re-asserting the "install libdvdcss" popup
 
 // Candidate locations for the user-supplied library. The install script drops it
 // at the first path; the sonames cover a lib already on the default search path.
@@ -238,9 +240,10 @@ static int disc_is_encrypted(const char *dev)
 	io.mx_sb_len = sizeof(sense);
 	io.timeout = 5000;
 
-	int css = 0;
-	if (ioctl(fd, SG_IO, &io) == 0 && io.status == 0)
-		css = (buf[4] != 0);   // CPST: 0 = none, 1 = CSS
+	int rc = ioctl(fd, SG_IO, &io);
+	int css = (rc == 0 && io.status == 0) ? (buf[4] != 0) : 0;
+	css_log("copyright probe: rc=%d status=0x%02x CPST=0x%02x -> %s",
+	        rc, io.status, buf[4], css ? "CSS" : "none/unknown");
 	close(fd);
 	return css;
 }
@@ -434,14 +437,11 @@ int dvd_css_open(void)
 		if (disc_is_encrypted(dev))
 		{
 			css_log("encrypted disc but no libdvdcss — run install_dvdcss");
-			// A single InfoMessage() is cleared the instant the core finishes
-			// loading — too fast to read. Re-assert it for a few seconds (as the
-			// crack progress loop does) so it stays up before the core goes black.
-			for (int t = 0; t < 45; t++)
-			{
-				InfoMessage("Encrypted DVD\n\nRun install_dvdcss", 3000, "DVD");
-				usleep(100000);   // ~4.5 s total
-			}
+			// InfoMessage only renders when menustate <= MENU_INFO (core idle), but
+			// the mount runs mid-launch when the menu FSM is in a high state, so a
+			// call here is dropped. Defer it: dvd_css_tick() (from user_io_poll)
+			// re-asserts it until the launch settles to MENU_NONE1 and it shows.
+			warn_until = time(NULL) + 8;
 		}
 		raw_fd = open(dev, O_RDONLY | O_CLOEXEC);
 		if (raw_fd < 0)
@@ -476,6 +476,23 @@ int dvd_css_open(void)
 int dvd_css_active(void)
 {
 	return css != NULL || raw_fd >= 0;
+}
+
+// Called every user_io_poll. Re-asserts the "encrypted disc, install libdvdcss"
+// popup ~once/second until its window closes — InfoMessage no-ops while the
+// launch FSM is busy and renders once menustate settles to idle (core running).
+void dvd_css_tick(void)
+{
+	if (!warn_until) return;
+	time_t now = time(NULL);
+	if (now >= warn_until) { warn_until = 0; return; }
+
+	static time_t last = 0;
+	if (now != last)   // at most once per second — the 2 s InfoMessage timeout bridges the gap
+	{
+		last = now;
+		InfoMessage("Encrypted DVD\n\nRun install_dvdcss", 2000, "DVD");
+	}
 }
 
 uint64_t dvd_css_size(void)
@@ -552,4 +569,5 @@ void dvd_css_close(void)
 	cur_vob = -1;
 	g_nvobs = 0;
 	css_size = 0;
+	warn_until = 0;
 }

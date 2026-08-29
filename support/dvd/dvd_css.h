@@ -32,4 +32,9 @@ int dvd_css_read(void *buf, uint32_t lba, uint32_t count);
 
 void dvd_css_close(void);
 
+// Call every user_io_poll: surfaces a deferred "encrypted disc, install
+// libdvdcss" popup once the launch settles (the mount runs too early to show
+// it). No-op unless such a warning is pending.
+void dvd_css_tick(void);
+
 #endif
