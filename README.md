@@ -193,6 +193,8 @@ The tutorial was written by **NinoPrime** and covers the process of preparing an
 
 Movie DVDs play on the **DVD** core, launched like any other Physical Disc core. Unencrypted DVDs need nothing extra. Most retail DVDs are CSS-encrypted; to play those you need libdvdcss, which is not bundled here. Copy `Scripts/install_dvdcss.sh` to `/media/fat/Scripts/`, then run **`install_dvdcss`** from the MiSTer Scripts menu once — it downloads the library for you. A **`CSS ENCRYPTED`** message means it is not installed yet.
 
+For fast key retrieval on encrypted discs, the drive should have its **region set** to match your discs (like a real DVD player). Many USB drives ship region-free — with no region set the drive won't hand over the keys, so playback falls back to a slow key crack (the core shows a *"Set drive region"* notice). Set it once with a PC tool such as `regionset`. Region-free discs work on any drive.
+
 ## Updating
 
 Physical Disc Support can be updated through:

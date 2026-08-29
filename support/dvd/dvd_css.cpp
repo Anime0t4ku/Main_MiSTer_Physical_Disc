@@ -62,6 +62,7 @@ static uint64_t css_size = 0;   // bytes
 static int css_pos = -1;        // last block position, to avoid redundant seeks
 static int cur_vob = -1;        // VOB index whose title key is currently selected
 static int raw_fd = -1;         // raw drive fd when libdvdcss is absent (no decrypt)
+static int region_set = 1;      // 0 if the drive has no CSS region set (keys will crack)
 
 // Candidate locations for the user-supplied library. The install script drops it
 // at the first path; the sonames cover a lib already on the default search path.
@@ -179,99 +180,34 @@ static int raw_read10(int fd, uint32_t lba, void *buf, int count)
 	return count;
 }
 
-// --- DIAGNOSTIC: does this drive answer raw CSS key commands over SG_IO? ---
-// libdvdcss does CSS auth via the /dev/sr DVD_AUTH ioctls, which often don't work
-// through usb-storage. This probes the SG_IO REPORT KEY (0xA4) path directly.
-static int report_key(int fd, int key_format, uint32_t lba, uint8_t agid, uint8_t *buf, int len)
+// Does the drive have a CSS region set? RPC-II drives refuse the title-key ioctl
+// (ReadTitleKey) unless a region matching the disc is set, which forces libdvdcss
+// into the slow, sometimes-failing per-title crack. Read the RPC state via SG_IO
+// REPORT KEY (format 0x08): region_mask 0xff means no region is set.
+static int drive_region_set(const char *dev)
 {
-	uint8_t cdb[12] = { 0xA4, 0,
-		(uint8_t)(lba >> 24), (uint8_t)(lba >> 16), (uint8_t)(lba >> 8), (uint8_t)lba,
-		0, 0, (uint8_t)(len >> 8), (uint8_t)len, (uint8_t)((agid << 6) | (key_format & 0x3f)), 0 };
-	uint8_t sense[32];
+	int fd = open(dev, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+	if (fd < 0) return 1;   // can't check -> assume set (don't nag)
+
+	uint8_t cdb[12] = { 0xA4, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0x08, 0 };   // REPORT KEY, RPC state
+	uint8_t buf[8] = { 0 }, sense[32];
 	struct sg_io_hdr io;
 	memset(&io, 0, sizeof(io));
 	io.interface_id = 'S';
-	io.dxfer_direction = len ? SG_DXFER_FROM_DEV : SG_DXFER_NONE;
+	io.dxfer_direction = SG_DXFER_FROM_DEV;
 	io.cmd_len = sizeof(cdb);
 	io.cmdp = cdb;
-	io.dxfer_len = len;
-	io.dxferp = len ? buf : NULL;
+	io.dxfer_len = sizeof(buf);
+	io.dxferp = buf;
 	io.sbp = sense;
 	io.mx_sb_len = sizeof(sense);
 	io.timeout = 5000;
-	if (len) memset(buf, 0, len);
-	if (ioctl(fd, SG_IO, &io) < 0) return -2;                       // SG_IO not available
-	if (io.status || io.host_status)
-	{
-		// surface a couple of sense bytes to tell "unsupported" from "not ready"
-		css_log("  (report_key fmt=0x%02x scsi_status=0x%02x sense=%02x/%02x)",
-		        key_format, io.status, sense[2] & 0x0f, sense[12]);
-		return io.status ? io.status : -1;
-	}
-	return 0;
-}
 
-static void css_probe_drive_keys(const char *dev)
-{
-	int fd = open(dev, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-	if (fd < 0) { css_log("probe: cannot open %s", dev); return; }
-
-	uint8_t buf[8];
-	// 1) RPC / region state (format 0x08) — a non-intrusive status read.
-	if (report_key(fd, 0x08, 0, 0, buf, 8) == 0)
-		css_log("probe: RPC state OK (SG_IO key cmds work): type=%d region_mask=0x%02x scheme=%d",
-		        buf[4] >> 6, buf[5], buf[6]);
-	else
-		css_log("probe: REPORT KEY(RPC state) rejected — drive won't do key cmds over SG_IO");
-
-	// 2) Request a CSS AGID (format 0x00) — the first step of CSS authentication.
-	if (report_key(fd, 0x00, 0, 0, buf, 8) == 0)
-	{
-		uint8_t agid = buf[7] >> 6;
-		css_log("probe: CSS AGID granted (%d) — SG_IO CSS auth is VIABLE", agid);
-		report_key(fd, 0x3f, 0, agid, buf, 0);   // invalidate the AGID we took
-	}
-	else
-	{
-		css_log("probe: CSS AGID request rejected — no SG_IO CSS auth on this drive");
-	}
-
+	int set = 1;
+	if (ioctl(fd, SG_IO, &io) == 0 && io.status == 0)
+		set = (buf[5] != 0xff);   // region_mask == 0xff -> no region set
 	close(fd);
-}
-
-// Probe the /dev/sr DVD_AUTH ioctl path — the one libdvdcss actually uses. If
-// this fails while the SG_IO probe above succeeds, that's the smoking gun:
-// libdvdcss can't authenticate on this drive/kernel and falls back to cracking.
-static void css_probe_dvdauth(const char *dev)
-{
-	int fd = open(dev, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-	if (fd < 0) return;
-
-	dvd_authinfo ai;
-	memset(&ai, 0, sizeof(ai));
-	ai.type = DVD_LU_SEND_RPC_STATE;
-	if (ioctl(fd, DVD_AUTH, &ai) == 0)
-		css_log("probe: DVD_AUTH RPC state OK — libdvdcss's ioctl path works here");
-	else
-		css_log("probe: DVD_AUTH RPC state FAILED (%s) — libdvdcss's ioctl path is broken", strerror(errno));
-
-	memset(&ai, 0, sizeof(ai));
-	ai.type = DVD_LU_SEND_AGID;
-	if (ioctl(fd, DVD_AUTH, &ai) == 0)
-	{
-		uint8_t agid = ai.lsa.agid;
-		css_log("probe: DVD_AUTH AGID granted (%d) — libdvdcss SHOULD authenticate via ioctl", agid);
-		memset(&ai, 0, sizeof(ai));
-		ai.type = DVD_INVALIDATE_AGID;
-		ai.lsa.agid = agid;
-		ioctl(fd, DVD_AUTH, &ai);
-	}
-	else
-	{
-		css_log("probe: DVD_AUTH AGID FAILED (%s) — libdvdcss can't auth via ioctl (SG_IO is the way)", strerror(errno));
-	}
-
-	close(fd);
+	return set;
 }
 
 // Read `count` raw (undecrypted) 2048-byte sectors at `lba` — for the unscrambled
@@ -393,35 +329,21 @@ static void build_vob_list(void)
 	}
 	collect_vobs(vts_lba, vts_len);
 
-	// Pre-crack each VOB's title key at its start sector (the reliable position).
-	// This blocks the main loop for a few seconds, so show a progress bar (the
-	// crack would otherwise be an unexplained black screen).
+	// Fetch each VOB's title key at its start sector. With a drive region set this
+	// is instant (ioctl); with none it's a slow crack — say so on screen instead of
+	// leaving an unexplained black screen. Also show a bar (blocks the main loop).
+	const char *title = region_set ? "DVD" : "Set drive region";
+	const char *text  = region_set ? "Preparing disc" : "No region: slow crack";
 	ProgressMessage();   // reset so the first update renders
 	int keyed = 0;
 	for (int i = 0; i < g_nvobs; i++)
 	{
-		ProgressMessage("DVD", "Preparing disc", i, g_nvobs);
+		ProgressMessage(title, text, i, g_nvobs);
 		if (p_seek(css, (int)g_vobs[i].start, DVDCSS_SEEK_KEY) >= 0) keyed++;
 	}
 	ProgressMessage();   // clear
-	css_log("%d VOBs, %d title keys", g_nvobs, keyed);
+	css_log("%d VOBs, %d title keys (region %s)", g_nvobs, keyed, region_set ? "set" : "NOT set");
 	css_pos = -1;
-}
-
-// DIAGNOSTIC: capture libdvdcss's own verbose output (it logs to stderr) during
-// the auth/key phase, so we can see exactly where its authentication gives up.
-static int g_verbose_saved = -1;
-static void css_verbose_begin(void)
-{
-	setenv("DVDCSS_VERBOSE", "2", 1);
-	g_verbose_saved = dup(2);
-	int vfd = open("/tmp/dvdcss_verbose.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-	if (vfd >= 0) { dup2(vfd, 2); close(vfd); }
-}
-static void css_verbose_end(void)
-{
-	fflush(stderr);
-	if (g_verbose_saved >= 0) { dup2(g_verbose_saved, 2); close(g_verbose_saved); g_verbose_saved = -1; }
 }
 
 int dvd_css_open(void)
@@ -435,8 +357,9 @@ int dvd_css_open(void)
 		return 0;
 	}
 
-	css_probe_drive_keys(dev);   // DIAGNOSTIC: SG_IO CSS key-command support
-	css_probe_dvdauth(dev);      // DIAGNOSTIC: the /dev/sr DVD_AUTH path libdvdcss uses
+	region_set = drive_region_set(dev);
+	if (!region_set)
+		css_log("drive has NO CSS region set — title keys must be cracked (slow); see README");
 
 	if (load_library())
 	{
@@ -453,19 +376,11 @@ int dvd_css_open(void)
 		mkdir("/media/fat/dvdcss/cache", 0755);
 		setenv("DVDCSS_CACHE", "/media/fat/dvdcss/cache", 1);
 
-		// This drive gates title-key retrieval on a region being set (it isn't),
-		// so the default drive-ioctl method falls back to the slow per-title crack.
-		// DVDCSS_METHOD=disc instead cracks the DISC key once (fast, using the auth
-		// the drive DOES grant) and DERIVES each title key from it — no region-gated
-		// drive key, no statistical title crack. (Re-testing now that we seek at the
-		// VOB start; the earlier disc-method try predated that fix.)
-		setenv("DVDCSS_METHOD", "disc", 1);
-
-		css_verbose_begin();
+		// Default method: fetch each title key from the drive via the CSS ioctls
+		// (instant) when a region is set, falling back to cracking otherwise.
 		css = p_open(dev);
 		if (!css)
 		{
-			css_verbose_end();
 			css_log("dvdcss_open(%s) failed", dev);
 			return 0;
 		}
@@ -501,7 +416,6 @@ int dvd_css_open(void)
 
 	// Discover the VOB layout and pre-crack every title key at its VOB start.
 	if (css) build_vob_list();
-	css_verbose_end();
 	return 1;
 }
 
