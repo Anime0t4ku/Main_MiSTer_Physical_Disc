@@ -213,6 +213,8 @@ uint64_t physical_disc_css_size(void)
 
 int physical_disc_css_read(void *buf, uint32_t lba, uint32_t count)
 {
+	static int entry_n = 0;
+	if (entry_n < 8) { entry_n++; css_log("css_read ENTRY lba=%u count=%u css=%p pos=%d", lba, count, (void *)css, css_pos); }
 	if (!css) return -1;
 
 	// Seek with DVDCSS_SEEK_KEY on a discontinuity so libdvdcss fetches (and
@@ -255,6 +257,7 @@ int physical_disc_css_read(void *buf, uint32_t lba, uint32_t count)
 
 void physical_disc_css_close(void)
 {
+	css_log("close called (css=%p)", (void *)css);
 	if (css && p_close) p_close(css);
 	css = NULL;
 	css_pos = -1;
