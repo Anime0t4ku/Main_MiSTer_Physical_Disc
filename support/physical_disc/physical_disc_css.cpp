@@ -69,6 +69,7 @@ static fn_error_t p_error = NULL;
 static dvdcss_t css = NULL;
 static uint64_t css_size = 0;   // bytes
 static int css_pos = -1;        // last block position, to avoid redundant seeks
+static int cur_vob = -1;        // VOB index whose title key is currently selected
 
 // Candidate locations for the user-supplied library. The install script drops it
 // at the first path; the sonames cover a lib already on the default search path.
@@ -225,14 +226,16 @@ static int iso_find(uint32_t dir_lba, uint32_t dir_len, const char *name, int wa
 	return 0;
 }
 
-// The VOB start LBAs, discovered at mount. Each title key is cracked LAZILY on
-// first access to its VOB (a ~2 s SEEK_KEY), never all-at-once at mount — a
-// synchronous full pre-crack froze the HPS main loop and blanked the core.
+// Every *.VOB file's extent [start, start+nsec), discovered at mount. Used to
+// (a) pre-crack each title key at its VOB start, and (b) decide per read whether
+// to decrypt: VOB sectors get SEEK_KEY(lba)+DECRYPT (the SEEK_KEY is a fast cached
+// lookup after the pre-crack); filesystem/IFO sectors are read raw (NOFLAGS) so
+// dvdcss can't corrupt them with a wrong current title key.
 #define MAX_VOBS 64
-static struct { uint32_t start; unsigned char cracked; } g_vobs[MAX_VOBS];
+static struct { uint32_t start, nsec; } g_vobs[MAX_VOBS];
 static int g_nvobs = 0;
 
-// Collect every *.VOB file's start LBA (no cracking).
+// Collect every *.VOB file's extent (start LBA + length in sectors).
 static void collect_vobs(uint32_t dir_lba, uint32_t dir_len)
 {
 	uint8_t sec[2048];
@@ -251,7 +254,7 @@ static void collect_vobs(uint32_t dir_lba, uint32_t dir_len)
 			if (!(flags & 0x02) && name_has_vob(nm, nlen) && g_nvobs < MAX_VOBS)
 			{
 				g_vobs[g_nvobs].start = rd_le32(sec + off + 2);
-				g_vobs[g_nvobs].cracked = 0;
+				g_vobs[g_nvobs].nsec = (rd_le32(sec + off + 10) + 2047) / 2048;
 				g_nvobs++;
 			}
 			off += rlen;
@@ -259,7 +262,17 @@ static void collect_vobs(uint32_t dir_lba, uint32_t dir_len)
 	}
 }
 
-// Walk ISO9660 (root -> VIDEO_TS) and record every VOB start LBA (fast, no crack).
+// Index of the VOB extent containing `lba` (a sector that may be scrambled), or
+// -1 for a filesystem/IFO sector (never scrambled -> must be read raw).
+static int vob_index(uint32_t lba)
+{
+	for (int i = 0; i < g_nvobs; i++)
+		if (lba >= g_vobs[i].start && lba < g_vobs[i].start + g_vobs[i].nsec) return i;
+	return -1;
+}
+
+// Walk ISO9660 (root -> VIDEO_TS) and record every VOB extent, then crack each
+// title key at its VOB start (fast cached lookups thereafter). Done once at mount.
 static void build_vob_list(void)
 {
 	g_nvobs = 0;
@@ -276,39 +289,14 @@ static void build_vob_list(void)
 		return;
 	}
 	collect_vobs(vts_lba, vts_len);
-
-	// sort by start LBA so ensure_key() can pick the VOB containing a read LBA
-	for (int i = 1; i < g_nvobs; i++)
-	{
-		uint32_t v = g_vobs[i].start;
-		int j = i - 1;
-		while (j >= 0 && g_vobs[j].start > v) { g_vobs[j + 1].start = g_vobs[j].start; j--; }
-		g_vobs[j + 1].start = v;
-	}
 	css_log("vobs: found %d VOB(s)", g_nvobs);
-	css_pos = -1;
-}
 
-// Crack (once) the title key for the VOB containing `lba`, at that VOB's START —
-// the position where libdvdcss's title crack is reliable. Blocks ~2 s the first
-// time each VOB is touched, then never again.
-static void ensure_key(uint32_t lba)
-{
-	int idx = -1;
+	// Pre-crack each VOB's title key at its start sector (the reliable position).
+	int keyed = 0;
 	for (int i = 0; i < g_nvobs; i++)
-	{
-		if (g_vobs[i].start <= lba) idx = i;
-		else break;
-	}
-	if (idx < 0 || g_vobs[idx].cracked) return;
-
-	if (p_seek(css, (int)g_vobs[idx].start, DVDCSS_SEEK_KEY) >= 0)
-		css_log("key cracked: VOB @ lba=%u (for read lba=%u)", g_vobs[idx].start, lba);
-	else
-		css_log("VOB @ lba=%u unscrambled / no key", g_vobs[idx].start);
-
-	g_vobs[idx].cracked = 1;   // don't retry every read, even if it had no key
-	css_pos = -1;              // SEEK_KEY moved the device position
+		if (p_seek(css, (int)g_vobs[i].start, DVDCSS_SEEK_KEY) >= 0) keyed++;
+	css_log("vobs: keyed %d/%d", keyed, g_nvobs);
+	css_pos = -1;
 }
 
 int physical_disc_css_open(void)
@@ -354,7 +342,7 @@ int physical_disc_css_open(void)
 	css_log("opened %s (%llu MB)%s", dev, (unsigned long long)(css_size >> 20),
 	        css_size ? "" : "  <-- WARNING size 0, core will reject");
 
-	// Discover the VOB layout now (fast); keys are cracked lazily on first access.
+	// Discover the VOB layout and pre-crack every title key at its VOB start.
 	build_vob_list();
 	return 1;
 }
@@ -373,26 +361,52 @@ int physical_disc_css_read(void *buf, uint32_t lba, uint32_t count)
 {
 	if (!css) return -1;
 
-	// Make sure this LBA's VOB title key is cracked (once, at the VOB start), then
-	// just position (DVDCSS_NOFLAGS); DVDCSS_READ_DECRYPT decrypts each block with
-	// the cached title key for that LBA's title — libdvdread's css_title/css_seek.
-	ensure_key(lba);
-	if ((int)lba != css_pos)
+	int vi = vob_index(lba);
+	int decrypt = (vi >= 0);
+
+	if (decrypt)
 	{
-		if (p_seek(css, (int)lba, DVDCSS_NOFLAGS) < 0)
+		// Don't let one read span two titles (different keys): clamp to this VOB.
+		uint32_t vob_end = g_vobs[vi].start + g_vobs[vi].nsec;
+		if (lba + count > vob_end) count = vob_end - lba;
+
+		// Select this VOB's (pre-cracked) title key. SEEK_KEY is a fast cached
+		// lookup now; only needed on a title change or a discontinuity.
+		if (vi != cur_vob || (int)lba != css_pos)
 		{
-			static int seekfail_n = 0;
-			if (seekfail_n < 10) { seekfail_n++; css_log("seek %u failed: %s", lba, p_error ? p_error(css) : "?"); }
-			css_pos = -1;
-			return -1;
+			if (p_seek(css, (int)lba, DVDCSS_SEEK_KEY) < 0)
+			{
+				if (p_seek(css, (int)lba, DVDCSS_NOFLAGS) < 0)
+				{
+					static int sf = 0;
+					if (sf < 10) { sf++; css_log("seek %u failed: %s", lba, p_error ? p_error(css) : "?"); }
+					css_pos = -1; cur_vob = -1; return -1;
+				}
+				decrypt = 0;   // no key -> read raw rather than corrupt
+			}
+			cur_vob = vi;
 		}
 	}
+	else
+	{
+		// Filesystem/IFO sector: raw positioning, NEVER decrypt (would corrupt it).
+		if ((int)lba != css_pos)
+		{
+			if (p_seek(css, (int)lba, DVDCSS_NOFLAGS) < 0)
+			{
+				static int sf2 = 0;
+				if (sf2 < 10) { sf2++; css_log("seek %u failed: %s", lba, p_error ? p_error(css) : "?"); }
+				css_pos = -1; return -1;
+			}
+		}
+		cur_vob = -1;
+	}
 
-	int n = p_read(css, buf, (int)count, DVDCSS_READ_DECRYPT);
+	int n = p_read(css, buf, (int)count, decrypt ? DVDCSS_READ_DECRYPT : DVDCSS_NOFLAGS);
 	if (n < 0)
 	{
-		static int readfail_n = 0;
-		if (readfail_n < 10) { readfail_n++; css_log("read %u@%u failed: %s", count, lba, p_error ? p_error(css) : "?"); }
+		static int rf = 0;
+		if (rf < 10) { rf++; css_log("read %u@%u failed: %s", count, lba, p_error ? p_error(css) : "?"); }
 		css_pos = -1;
 		return -1;
 	}
@@ -420,5 +434,7 @@ void physical_disc_css_close(void)
 	if (css && p_close) p_close(css);
 	css = NULL;
 	css_pos = -1;
+	cur_vob = -1;
+	g_nvobs = 0;
 	css_size = 0;
 }
