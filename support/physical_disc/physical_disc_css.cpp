@@ -47,7 +47,9 @@ void physical_disc_css_diag(const char *fmt, ...)
 
 // --- libdvdcss API (from dvdcss.h; reproduced so we need no external headers) ---
 typedef struct dvdcss_s *dvdcss_t;
+#define DVDCSS_NOFLAGS       0
 #define DVDCSS_READ_DECRYPT (1 << 0)
+#define DVDCSS_SEEK_MPEG    (1 << 0)
 #define DVDCSS_SEEK_KEY     (1 << 1)
 
 typedef dvdcss_t(*fn_open_t)(const char *);
@@ -213,18 +215,19 @@ uint64_t physical_disc_css_size(void)
 
 int physical_disc_css_read(void *buf, uint32_t lba, uint32_t count)
 {
-	static int entry_n = 0;
-	if (entry_n < 8) { entry_n++; css_log("css_read ENTRY lba=%u count=%u css=%p pos=%d", lba, count, (void *)css, css_pos); }
 	if (!css) return -1;
 
-	// Seek with DVDCSS_SEEK_KEY on a discontinuity so libdvdcss fetches (and
-	// caches) the title key covering this position; sequential reads within a
-	// cached region skip the seek. DVDCSS_READ_DECRYPT descrambles each block.
+	// Seek with DVDCSS_SEEK_MPEG on a discontinuity: libdvdcss fetches (and caches)
+	// the title key when the sector is inside a VTS, and just continues for the
+	// unscrambled filesystem/IFO sectors (DVDCSS_SEEK_KEY hard-fails on those).
+	// DVDCSS_READ_DECRYPT then passes unscrambled sectors through and descrambles
+	// scrambled ones with the cached title key.
 	if ((int)lba != css_pos)
 	{
-		if (p_seek(css, (int)lba, DVDCSS_SEEK_KEY) < 0)
+		if (p_seek(css, (int)lba, DVDCSS_SEEK_MPEG) < 0)
 		{
-			css_log("seek to %u failed: %s", lba, p_error ? p_error(css) : "?");
+			static int seekfail_n = 0;
+			if (seekfail_n < 10) { seekfail_n++; css_log("seek %u failed: %s", lba, p_error ? p_error(css) : "?"); }
 			css_pos = -1;
 			return -1;
 		}
@@ -233,7 +236,8 @@ int physical_disc_css_read(void *buf, uint32_t lba, uint32_t count)
 	int n = p_read(css, buf, (int)count, DVDCSS_READ_DECRYPT);
 	if (n < 0)
 	{
-		css_log("read %u@%u failed: %s", count, lba, p_error ? p_error(css) : "?");
+		static int readfail_n = 0;
+		if (readfail_n < 10) { readfail_n++; css_log("read %u@%u failed: %s", count, lba, p_error ? p_error(css) : "?"); }
 		css_pos = -1;
 		return -1;
 	}
