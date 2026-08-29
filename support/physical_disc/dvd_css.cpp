@@ -1,4 +1,4 @@
-// physical_disc_css.cpp — see physical_disc_css.h.
+// dvd_css.cpp — see dvd_css.h.
 //
 // libdvdcss is dlopen'd at runtime (never linked). The only libdvdcss surface we
 // use is its published API, declared here so the build needs no libdvdcss headers.
@@ -17,7 +17,7 @@
 #include <linux/cdrom.h>
 #include <linux/fs.h>
 
-#include "physical_disc_css.h"
+#include "dvd_css.h"
 
 // Log to stdout AND to a file, so the reason for a failed mount is visible over
 // SSH regardless of which (possibly supervised) MiSTer instance handled it.
@@ -34,7 +34,7 @@ static void css_log(const char *fmt, ...)
 	if (f) { fprintf(f, "%s\n", buf); fclose(f); }
 }
 
-void physical_disc_css_diag(const char *fmt, ...)
+void dvd_css_diag(const char *fmt, ...)
 {
 	char buf[256];
 	va_list ap;
@@ -299,7 +299,7 @@ static void build_vob_list(void)
 	css_pos = -1;
 }
 
-int physical_disc_css_open(void)
+int dvd_css_open(void)
 {
 	if (css) return 1;
 	css_log("open: begin");
@@ -347,17 +347,17 @@ int physical_disc_css_open(void)
 	return 1;
 }
 
-int physical_disc_css_active(void)
+int dvd_css_active(void)
 {
 	return css != NULL;
 }
 
-uint64_t physical_disc_css_size(void)
+uint64_t dvd_css_size(void)
 {
 	return css ? css_size : 0;
 }
 
-int physical_disc_css_read(void *buf, uint32_t lba, uint32_t count)
+int dvd_css_read(void *buf, uint32_t lba, uint32_t count)
 {
 	if (!css) return -1;
 
@@ -428,7 +428,7 @@ int physical_disc_css_read(void *buf, uint32_t lba, uint32_t count)
 	return n;
 }
 
-void physical_disc_css_close(void)
+void dvd_css_close(void)
 {
 	css_log("close called (css=%p)", (void *)css);
 	if (css && p_close) p_close(css);

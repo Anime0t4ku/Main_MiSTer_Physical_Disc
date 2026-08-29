@@ -35,7 +35,7 @@
 #include "ide.h"
 #include "ide_cdrom.h"
 #include "support/physical_disc/physical_disc.h"
-#include "support/physical_disc/physical_disc_css.h"
+#include "support/physical_disc/dvd_css.h"
 #ifdef PROFILING
 #include "profiling.h"
 #endif
@@ -2112,7 +2112,7 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 	int img_type = 0; // disk image type (for C128 core): bit 0=dual sided, 1=raw GCR supported, 2=raw MFM supported, 3=high density
 
 	sd_image_cangrow[index] = (pre != 0);
-	if (sd_type[index] == SD_TYPE_DVDCSS) physical_disc_css_close();
+	if (sd_type[index] == SD_TYPE_DVDCSS) dvd_css_close();
 	sd_type[index] = SD_TYPE_DEFAULT ;
 	if (len)
 	{
@@ -2124,10 +2124,10 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 				// serves CSS-decrypted 2048-byte sectors; the slot is drive-backed
 				// and read-only. If libdvdcss is absent this fails and the mount is
 				// rejected (the user is told to run Scripts/install_dvdcss).
-				if (physical_disc_css_open())
+				if (dvd_css_open())
 				{
 					sd_type[index] = SD_TYPE_DVDCSS;
-					sd_image[index].size = physical_disc_css_size();
+					sd_image[index].size = dvd_css_size();
 					writable = 0;
 					ret = 1;
 				}
@@ -3172,7 +3172,7 @@ void user_io_poll()
 		if (!poll_ct_logged)
 		{
 			poll_ct_logged = 1;
-			physical_disc_css_diag("user_io_poll: core_type=0x%02x (8BIT=0x%02x SHARPMZ=0x%02x) early_return=%d",
+			dvd_css_diag("user_io_poll: core_type=0x%02x (8BIT=0x%02x SHARPMZ=0x%02x) early_return=%d",
 				core_type, CORE_TYPE_8BIT, CORE_TYPE_SHARPMZ,
 				(int)(core_type != CORE_TYPE_SHARPMZ && core_type != CORE_TYPE_8BIT));
 		}
@@ -3234,7 +3234,7 @@ void user_io_poll()
 		if (!ct_logged)
 		{
 			ct_logged = 1;
-			physical_disc_css_diag("poll: core_type=0x%02x CORE_8BIT=0x%02x is_menu=%d is_minimig=%d x86=%d",
+			dvd_css_diag("poll: core_type=0x%02x CORE_8BIT=0x%02x is_menu=%d is_minimig=%d x86=%d",
 				core_type, CORE_TYPE_8BIT, is_menu(), is_minimig(), (int)(is_x86() || is_pcxt()));
 		}
 	}
@@ -3340,7 +3340,7 @@ void user_io_poll()
 				if (dvd_diag_n < 60)
 				{
 					dvd_diag_n++;
-					physical_disc_css_diag("REQ disk=%d op=%d lba=%llu blksz=%u blks=%u sdtype=%d",
+					dvd_css_diag("REQ disk=%d op=%d lba=%llu blksz=%u blks=%u sdtype=%d",
 						disk, op, (unsigned long long)lba, blksz, blks, sd_type[disk]);
 				}
 			}
@@ -3459,7 +3459,7 @@ void user_io_poll()
 					else if (sd_type[disk] == SD_TYPE_DVDCSS)
 					{
 						diskled_on();
-						if (physical_disc_css_read(buffer[disk], lba, buf_n) > 0)
+						if (dvd_css_read(buffer[disk], lba, buf_n) > 0)
 						{
 							done = 1;
 							buffer_lba[disk] = lba;
@@ -3553,7 +3553,7 @@ void user_io_poll()
 					}
 					else if (sd_type[disk] == SD_TYPE_DVDCSS)
 					{
-						if (physical_disc_css_read(buffer[disk], lba, buf_n) > 0)
+						if (dvd_css_read(buffer[disk], lba, buf_n) > 0)
 						{
 							buffer_lba[disk] = lba;
 						}
