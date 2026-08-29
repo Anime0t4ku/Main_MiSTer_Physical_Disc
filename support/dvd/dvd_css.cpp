@@ -213,6 +213,38 @@ static int drive_region_set(const char *dev)
 	return set;
 }
 
+// Is the disc CSS/CPPM-protected? READ DVD STRUCTURE (0xAD), format 0x01
+// (copyright info): response byte 4 (CPST) is 0 for none, non-zero for CSS.
+// Asked WITHOUT authentication (a status read), so it works with no libdvdcss —
+// which is how we can warn instead of parking on a black screen: many drives
+// refuse a plain READ(10) of the scrambled VOB area, so the core would starve
+// with no scrambled PES ever reaching its CSS ENCRYPTED detector.
+static int disc_is_encrypted(const char *dev)
+{
+	int fd = open(dev, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+	if (fd < 0) return 0;
+
+	uint8_t cdb[12] = { 0xAD, 0, 0, 0, 0, 0, 0, 0x01, 0, 8, 0, 0 };   // READ DVD STRUCTURE, copyright
+	uint8_t buf[8] = { 0 }, sense[32];
+	struct sg_io_hdr io;
+	memset(&io, 0, sizeof(io));
+	io.interface_id = 'S';
+	io.dxfer_direction = SG_DXFER_FROM_DEV;
+	io.cmd_len = sizeof(cdb);
+	io.cmdp = cdb;
+	io.dxfer_len = sizeof(buf);
+	io.dxferp = buf;
+	io.sbp = sense;
+	io.mx_sb_len = sizeof(sense);
+	io.timeout = 5000;
+
+	int css = 0;
+	if (ioctl(fd, SG_IO, &io) == 0 && io.status == 0)
+		css = (buf[4] != 0);   // CPST: 0 = none, 1 = CSS
+	close(fd);
+	return css;
+}
+
 // Read `count` raw (undecrypted) 2048-byte sectors at `lba` — for the unscrambled
 // ISO9660 metadata used to enumerate VOB files. Returns sectors read or -1.
 static int css_raw_read(uint32_t lba, void *buf, int count)
@@ -395,8 +427,15 @@ int dvd_css_open(void)
 	}
 	else
 	{
-		// No libdvdcss: raw fallback. Unencrypted DVDs play; CSS discs come back
-		// scrambled and the core shows CSS ENCRYPTED (run install_dvdcss then).
+		// No libdvdcss: raw fallback. Unencrypted DVDs play; a CSS disc can't be
+		// descrambled here — and many drives won't even hand over the scrambled
+		// VOB sectors without auth, so the core would just sit black with no data
+		// to trip its CSS ENCRYPTED detector. Detect CSS up front and say so.
+		if (disc_is_encrypted(dev))
+		{
+			css_log("encrypted disc but no libdvdcss — run install_dvdcss");
+			InfoMessage("Encrypted DVD\n\nRun install_dvdcss", 8000, "DVD");
+		}
 		raw_fd = open(dev, O_RDONLY | O_CLOEXEC);
 		if (raw_fd < 0)
 		{
