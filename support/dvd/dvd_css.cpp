@@ -332,8 +332,9 @@ static void build_vob_list(void)
 	// Fetch each VOB's title key at its start sector. With a drive region set this
 	// is instant (ioctl); with none it's a slow crack — say so on screen instead of
 	// leaving an unexplained black screen. Also show a bar (blocks the main loop).
-	const char *title = region_set ? "DVD" : "Set drive region";
-	const char *text  = region_set ? "Preparing disc" : "No region: slow crack";
+	// Sidebar title fits ~9 chars; the main line is capped at 27 (ProgressMessage).
+	const char *title = "DVD";
+	const char *text  = region_set ? "Preparing disc" : "No drive region: cracking";
 	ProgressMessage();   // reset so the first update renders
 	int keyed = 0;
 	for (int i = 0; i < g_nvobs; i++)
