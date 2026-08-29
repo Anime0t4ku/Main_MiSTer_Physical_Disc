@@ -17,6 +17,7 @@ For easier setup and configuration, **MiSTer Companion** can install, update, an
 - 3DO *(experimental / unstable)*
 - SNES MSU-1
 - Mega Drive / Genesis MD+
+- DVD-Video *(movie DVDs)*
 
 Compatibility can vary depending on the game, core, and USB optical drive being used.
 
@@ -76,28 +77,9 @@ The MGL files make it easy to manually select which Physical Disc core should be
 
 They are also useful for Audio CDs, as you can simply launch the MGL for the core you want to use.
 
-## Playing DVD-Video discs (DVD core)
+## DVD-Video discs
 
-Physical DVD movies play on the **DVD** core, the same way as the console cores:
-
-- **Manual:** insert the disc, open **`_Physical Disc Cores`**, and pick **DVD** — the core
-  loads and the disc mounts automatically.
-- **Auto Disc Detection** (if enabled): insert a DVD-Video disc and the DVD core launches on
-  its own.
-
-Both need a **`DVD.mgl`** launcher in `/media/fat/_Physical Disc Cores/` pointing at your DVD
-core `.rbf`. A template is provided at `support/dvd/DVD.mgl` — copy it there and set
-its `<rbf>` path to where your DVD core lives (e.g. `_Console/DVD`).
-
-Most retail DVDs are encrypted (CSS). To play those, install the DVD decryption library once:
-
-1. Run **`install_dvdcss`** from the MiSTer **Scripts** menu.
-2. Insert the disc and launch the DVD core (either way above).
-
-That's it — encrypted discs now play. If an encrypted disc doesn't start (black screen, or a
-**`CSS ENCRYPTED`** message), the library isn't installed yet — run the script above. (The
-library, libdvdcss, is not part of MiSTer and is not bundled here; the script downloads it for
-you.)
+Movie DVDs play on the **DVD** core, launched like any other Physical Disc core. Most retail DVDs are CSS-encrypted; to play those, run **`install_dvdcss`** from the Scripts menu once (it downloads libdvdcss, which is not bundled here). A **`CSS ENCRYPTED`** message means the library is not installed yet.
 
 ## Auto Disc Detection
 

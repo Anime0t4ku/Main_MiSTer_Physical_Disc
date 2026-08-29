@@ -455,7 +455,6 @@ void user_io_read_core_name()
 	is_saturn_type = 0;
 	is_n64_type = 0;
 	is_uneon_type = 0;
-	is_3do_type = 0;
 	is_dvd_type = 0;
 	core_name[0] = 0;
 
