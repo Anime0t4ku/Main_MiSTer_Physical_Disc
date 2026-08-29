@@ -3165,6 +3165,18 @@ void user_io_poll()
 	// is being updated and getting a corrupted image.
 	add_frame_callback(screenshot_cb);
 
+	if (is_dvd())
+	{
+		static int poll_ct_logged = 0;
+		if (!poll_ct_logged)
+		{
+			poll_ct_logged = 1;
+			physical_disc_css_diag("user_io_poll: core_type=0x%02x (8BIT=0x%02x SHARPMZ=0x%02x) early_return=%d",
+				core_type, CORE_TYPE_8BIT, CORE_TYPE_SHARPMZ,
+				(int)(core_type != CORE_TYPE_SHARPMZ && core_type != CORE_TYPE_8BIT));
+		}
+	}
+
 	if ((core_type != CORE_TYPE_SHARPMZ) &&
 		(core_type != CORE_TYPE_8BIT))
 	{
