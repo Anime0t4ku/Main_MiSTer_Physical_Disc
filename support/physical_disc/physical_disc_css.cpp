@@ -165,6 +165,123 @@ static int find_dvd_device(char *out, int outsz)
 	return 0;
 }
 
+static inline uint32_t rd_le32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+// Read `count` raw (undecrypted) 2048-byte sectors at `lba` — for the unscrambled
+// ISO9660 metadata used to enumerate VOB files. Returns sectors read or -1.
+static int css_raw_read(uint32_t lba, void *buf, int count)
+{
+	if (p_seek(css, (int)lba, DVDCSS_NOFLAGS) < 0) return -1;
+	return p_read(css, buf, count, DVDCSS_NOFLAGS);
+}
+
+static int name_eq(const char *nm, int nlen, const char *want)
+{
+	int wl = (int)strlen(want);
+	if (nlen != wl) return 0;
+	for (int i = 0; i < wl; i++)
+		if ((nm[i] | 32) != (want[i] | 32)) return 0;
+	return 1;
+}
+
+static int name_has_vob(const char *nm, int nlen)
+{
+	for (int i = 0; i + 4 <= nlen; i++)
+		if (nm[i] == '.' && (nm[i + 1] | 32) == 'v' && (nm[i + 2] | 32) == 'o' && (nm[i + 3] | 32) == 'b')
+			return 1;
+	return 0;
+}
+
+// Find a directory child by name (want_dir=1 for a subdirectory).
+static int iso_find(uint32_t dir_lba, uint32_t dir_len, const char *name, int want_dir,
+                    uint32_t *out_lba, uint32_t *out_len)
+{
+	uint8_t sec[2048];
+	uint32_t nsec = (dir_len + 2047) / 2048;
+	for (uint32_t s = 0; s < nsec; s++)
+	{
+		if (css_raw_read(dir_lba + s, sec, 1) < 1) return 0;
+		uint32_t off = 0;
+		while (off + 33 < 2048)
+		{
+			uint8_t rlen = sec[off];
+			if (rlen == 0) break;               // rest of the sector is padding
+			uint8_t flags = sec[off + 25];
+			uint8_t nlen = sec[off + 32];
+			const char *nm = (const char *)(sec + off + 33);
+			int is_dir = (flags & 0x02) != 0;
+			if ((want_dir ? is_dir : !is_dir) && name_eq(nm, nlen, name))
+			{
+				*out_lba = rd_le32(sec + off + 2);
+				*out_len = rd_le32(sec + off + 10);
+				return 1;
+			}
+			off += rlen;
+		}
+	}
+	return 0;
+}
+
+// SEEK_KEY at every *.VOB file's START sector so libdvdcss cracks/caches that
+// title's key at a reliable position (a VOB start), not wherever the core reads.
+static int precrack_vobs(uint32_t dir_lba, uint32_t dir_len)
+{
+	uint8_t sec[2048];
+	uint32_t nsec = (dir_len + 2047) / 2048;
+	int keyed = 0;
+	for (uint32_t s = 0; s < nsec; s++)
+	{
+		if (css_raw_read(dir_lba + s, sec, 1) < 1) break;
+		uint32_t off = 0;
+		while (off + 33 < 2048)
+		{
+			uint8_t rlen = sec[off];
+			if (rlen == 0) break;
+			uint8_t flags = sec[off + 25];
+			uint8_t nlen = sec[off + 32];
+			const char *nm = (const char *)(sec + off + 33);
+			if (!(flags & 0x02) && name_has_vob(nm, nlen))
+			{
+				uint32_t vob_lba = rd_le32(sec + off + 2);
+				if (p_seek(css, (int)vob_lba, DVDCSS_SEEK_KEY) >= 0)
+				{
+					keyed++;
+					css_log("precrack: key OK, VOB @ lba=%u", vob_lba);
+				}
+				else
+				{
+					css_log("precrack: VOB @ lba=%u (unscrambled / no key)", vob_lba);
+				}
+			}
+			off += rlen;
+		}
+	}
+	return keyed;
+}
+
+// Walk ISO9660 (root -> VIDEO_TS) and pre-crack every VOB title key.
+static void precrack_title_keys(void)
+{
+	uint8_t sec[2048];
+	if (css_raw_read(16, sec, 1) < 1) { css_log("precrack: PVD read failed"); return; }
+	if (memcmp(sec + 1, "CD001", 5) != 0) { css_log("precrack: not ISO9660"); return; }
+
+	uint32_t root_lba = rd_le32(sec + 156 + 2);
+	uint32_t root_len = rd_le32(sec + 156 + 10);
+	uint32_t vts_lba = 0, vts_len = 0;
+	if (!iso_find(root_lba, root_len, "VIDEO_TS", 1, &vts_lba, &vts_len))
+	{
+		css_log("precrack: VIDEO_TS dir not found");
+		return;
+	}
+	int n = precrack_vobs(vts_lba, vts_len);
+	css_log("precrack: keyed %d VOB(s)", n);
+	css_pos = -1;   // our position tracking is stale after the pre-crack seeks
+}
+
 int physical_disc_css_open(void)
 {
 	if (css) return 1;
@@ -178,11 +295,11 @@ int physical_disc_css_open(void)
 		return 0;
 	}
 
-	// USB optical bridges usually don't pass the CSS key ioctls. DVDCSS_METHOD=disc
-	// cracks the DISC key once and derives each title key from the stream, which
-	// (unlike the per-title statistical crack) does not depend on seeking to a
-	// VOB start — better suited to the core's random-access read pattern.
-	setenv("DVDCSS_METHOD", "disc", 1);
+	// USB optical bridges usually don't pass the CSS key ioctls, so force libdvdcss
+	// to CRACK the title keys from the data. The crack is only reliable at a VOB
+	// START, so precrack_title_keys() below seeks there for every VOB (like
+	// libdvdread's css_title at dvd_file->lb_start); reads then just decrypt.
+	setenv("DVDCSS_METHOD", "title", 1);
 
 	css = p_open(dev);
 	if (!css)
@@ -207,6 +324,9 @@ int physical_disc_css_open(void)
 	css_pos = -1;
 	css_log("opened %s (%llu MB)%s", dev, (unsigned long long)(css_size >> 20),
 	        css_size ? "" : "  <-- WARNING size 0, core will reject");
+
+	// Pre-crack every VOB title key now, at the reliable VOB-start positions.
+	precrack_title_keys();
 	return 1;
 }
 
@@ -224,34 +344,17 @@ int physical_disc_css_read(void *buf, uint32_t lba, uint32_t count)
 {
 	if (!css) return -1;
 
-	// On a discontinuity, first try to fetch the title key for this sector
-	// (DVDCSS_SEEK_KEY) — that works for VTS/VOB sectors. The filesystem/IFO
-	// sectors (e.g. 0, 16) are NOT in any title, so that fetch hard-fails; there
-	// we fall back to a plain positioning seek (DVDCSS_NOFLAGS). Those sectors are
-	// unscrambled, so DVDCSS_READ_DECRYPT returns them as-is; scrambled VOB sectors
-	// get decrypted with the key fetched by the SEEK_KEY path.
+	// Keys were pre-cracked at the VOB starts (precrack_title_keys), so here we
+	// just position (DVDCSS_NOFLAGS) and DVDCSS_READ_DECRYPT decrypts each block
+	// with the cached title key for that LBA's title — libdvdread's css_seek/read.
 	if ((int)lba != css_pos)
 	{
-		if (p_seek(css, (int)lba, DVDCSS_SEEK_KEY) < 0)
+		if (p_seek(css, (int)lba, DVDCSS_NOFLAGS) < 0)
 		{
-			if (p_seek(css, (int)lba, DVDCSS_NOFLAGS) < 0)
-			{
-				static int seekfail_n = 0;
-				if (seekfail_n < 10) { seekfail_n++; css_log("seek %u failed: %s", lba, p_error ? p_error(css) : "?"); }
-				css_pos = -1;
-				return -1;
-			}
-			// SEEK_KEY failed but plain seek worked: no title key for this sector.
-			// Expected for the filesystem/IFO area (low LBAs); a problem if it
-			// happens on the content VOBs (high LBAs) -> those stay scrambled.
-			static int nokey = 0;
-			if (nokey < 30 && lba > 256) { nokey++; css_log("NO KEY at lba=%u (plain read -> scrambled if VOB)", lba); }
-		}
-		else
-		{
-			// SEEK_KEY succeeded -> a title key was obtained for this region.
-			static int keylog = 0;
-			if (keylog < 30) { keylog++; css_log("title key OK at lba=%u", lba); }
+			static int seekfail_n = 0;
+			if (seekfail_n < 10) { seekfail_n++; css_log("seek %u failed: %s", lba, p_error ? p_error(css) : "?"); }
+			css_pos = -1;
+			return -1;
 		}
 	}
 
