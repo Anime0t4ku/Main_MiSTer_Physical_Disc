@@ -51,7 +51,8 @@ static fileTYPE sd_image[16] = {};
 #define  SD_TYPE_DEFAULT 0
 #define  SD_TYPE_C64 1
 #define  SD_TYPE_A2 2
-#define  SD_TYPE_DVDCSS 3   // physical DVD-Video, sectors served CSS-decrypted via libdvdcss
+#define  SD_TYPE_DVDCSS 4   // physical DVD-Video, sectors served CSS-decrypted via libdvdcss
+                             // (NOTE: 3 == SD_TYPE_IIGS in support/a2/iigs_disk.h — must differ)
 
 static int      sd_type[16] = {};
 static unsigned char last_file_ext_idx = 0;
