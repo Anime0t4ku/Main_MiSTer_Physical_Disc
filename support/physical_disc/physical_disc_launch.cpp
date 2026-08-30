@@ -55,6 +55,7 @@ static int menu_discovery_suspended = 0;
 #define MISTER_HIFI_SCRIPT "/media/fat/Scripts/misterhifi.sh"
 #define PHYSICAL_DISC_DVD_MOUNT "/tmp/physical_disc_dvd"
 #define DVD_PLAYER_RBF "DVD_Player.rbf"
+#define DVD_FPGA_CORE "DVD"
 
 static int run_quiet(const char *program, const char *arg1, const char *arg2,
 	const char *arg3, const char *arg4)
@@ -103,17 +104,69 @@ static int menu_is_dvd_video(void)
 	return is_dvd;
 }
 
+enum
+{
+	DVD_SELECT_AUTO = 0,
+	DVD_SELECT_HYBRID,
+	DVD_SELECT_FPGA,
+	DVD_SELECT_INVALID,
+};
+
+static int menu_dvd_selection(void)
+{
+	const char *name = cfg.physical_disc_dvd;
+	if (!name || !*name) return DVD_SELECT_AUTO;
+	if (!strcasecmp(name, "HYBRID")) return DVD_SELECT_HYBRID;
+	if (!strcasecmp(name, "FPGA")) return DVD_SELECT_FPGA;
+	return DVD_SELECT_INVALID;
+}
+
 static int menu_launch_dvd_player(void)
 {
 	char path[512];
-	if (!find_core_rbf(DVD_PLAYER_RBF, path, sizeof(path)))
+	int selection = menu_dvd_selection();
+	int fpga = selection == DVD_SELECT_FPGA;
+
+	if (selection == DVD_SELECT_INVALID)
 	{
-		printf("DISC: DVD-Video detected but %s was not found\n", DVD_PLAYER_RBF);
-		Info("DVD Player core not found", 5000);
+		printf("DISC: invalid DVD setting '%s'; expected HYBRID or FPGA\n", cfg.physical_disc_dvd);
+		Info("Invalid DVD setting", 5000);
 		return 0;
 	}
 
-	printf("DISC: DVD-Video detected, launching %s\n", path);
+	int found = 0;
+	if (selection == DVD_SELECT_AUTO)
+	{
+		found = find_core_rbf(DVD_PLAYER_RBF, path, sizeof(path));
+		if (!found)
+		{
+			fpga = 1;
+			found = find_core_rbf(DVD_FPGA_CORE, path, sizeof(path));
+		}
+	}
+	else
+	{
+		found = find_core_rbf(fpga ? DVD_FPGA_CORE : DVD_PLAYER_RBF, path, sizeof(path));
+	}
+
+	if (!found)
+	{
+		if (selection == DVD_SELECT_AUTO)
+		{
+			printf("DISC: DVD-Video detected but no supported DVD core was found\n");
+			Info("DVD core not found", 5000);
+		}
+		else
+		{
+			printf("DISC: DVD-Video detected but the selected %s core was not found\n",
+				fpga ? "FPGA DVD" : "Hybrid DVD Player");
+			Info(fpga ? "FPGA DVD core not found" : "Hybrid DVD core not found", 5000);
+		}
+		return 0;
+	}
+
+	printf("DISC: DVD-Video detected, DVD=%s%s, launching %s\n",
+		fpga ? "FPGA" : "HYBRID", selection == DVD_SELECT_AUTO ? " (automatic)" : "", path);
 	fpga_load_rbf(path);
 	return 1;
 }

@@ -77,6 +77,7 @@ static const ini_var_t ini_vars[] =
 	{ "PHYSICAL_DISC_MOUNT_DELAY", (void*)(&(cfg.physical_disc_mount_delay)), UINT8, 0, 30 },
 	{ "PHYSICAL_DISC_ACOUSTIC", (void*)(&(cfg.physical_disc_acoustic)), UINT8, 0, 1 },
 	{ "AUDIOCD", (void*)(cfg.physical_disc_audio_cd), STRING, 0, sizeof(cfg.physical_disc_audio_cd) - 1 },
+	{ "DVD", (void*)(cfg.physical_disc_dvd), STRING, 0, sizeof(cfg.physical_disc_dvd) - 1 },
 	{ "FONT", (void*)(&(cfg.font)), STRING, 0, sizeof(cfg.font) - 1 },
 	{ "FB_SIZE", (void*)(&(cfg.fb_size)), UINT8, 0, 4 },
 	{ "FB_TERMINAL", (void*)(&(cfg.fb_terminal)), UINT8, 0, 1 },

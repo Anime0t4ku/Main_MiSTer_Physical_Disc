@@ -160,6 +160,31 @@ The Audio CD override is only relevant when using Auto Disc Detection.
 
 When Auto Disc Detection is disabled, simply open **`_Physical Disc Cores`** and launch the MGL for the core you want to use.
 
+## DVD Core Selection
+
+When Auto Disc Detection recognizes a DVD-Video disc and no `DVD=` entry is configured, it selects an installed DVD core automatically. The hybrid DVD Player core is preferred when both supported cores are installed; otherwise, the available core is launched.
+
+To select which installed DVD core should be launched automatically, add one `DVD=` entry to your existing `[menu]` section:
+
+```ini
+DVD=HYBRID
+```
+
+Supported DVD core selections:
+
+```ini
+DVD=HYBRID
+DVD=FPGA
+```
+
+`DVD=HYBRID` launches only `DVD_Player.rbf`.
+
+`DVD=FPGA` launches the latest dated `DVD_<date>.rbf` core, such as `/media/fat/_Other/DVD_20260830.rbf`.
+
+Both DVD cores support physical DVDs independently. This setting is only used by Auto Disc Detection to choose which core to open when a DVD-Video disc is inserted.
+
+An explicit selection is always respected. If the selected core is not installed, Auto Disc Detection shows a warning instead of launching the other core. Invalid `DVD=` values are also reported without launching a core.
+
 ## Disc Swapping
 
 Supported cores can detect physical disc removal and insertion while running.
