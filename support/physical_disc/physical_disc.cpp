@@ -1620,6 +1620,49 @@ static uint32_t iso_le32(const uint8_t *p)
 	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+static int iso_root_has_file(int base, const char *wanted)
+{
+	uint8_t pvd[2048];
+	const int wanted_len = wanted ? strlen(wanted) : 0;
+	if (!wanted || !*wanted || physical_disc_read_data2048(base + 16, pvd)) return 0;
+	if (pvd[0] != 1 || memcmp(pvd + 1, "CD001", 5)) return 0;
+
+	const uint8_t *root = pvd + 156;
+	if (root[0] < 34) return 0;
+	uint32_t extent = iso_le32(root + 2);
+	uint32_t size = iso_le32(root + 10);
+	if (!extent || !size) return 0;
+
+	// ISO9660 directory records never cross a logical-sector boundary. Keep the
+	// lookup bounded in case a damaged disc reports an unreasonable root size.
+	if (size > 1024 * 1024) size = 1024 * 1024;
+	for (uint32_t done = 0; done < size; done += 2048) {
+		uint8_t sec[2048];
+		if (physical_disc_read_data2048(base + extent + done / 2048, sec)) return 0;
+
+		uint32_t remaining = size - done;
+		int limit = remaining < 2048 ? (int)remaining : 2048;
+		for (int off = 0; off < limit;) {
+			int len = sec[off];
+			if (!len) break;
+			if (len < 34 || off + len > limit) break;
+
+			int nlen = sec[off + 32];
+			if (nlen > 0 && off + 33 + nlen <= off + len && !(sec[off + 25] & 0x02)) {
+				const char *name = (const char *)(sec + off + 33);
+				int plain_len = nlen;
+				for (int i = 0; i < nlen; i++) {
+					if (name[i] == ';') { plain_len = i; break; }
+				}
+				if (wanted_len == plain_len && !strncasecmp(name, wanted, plain_len)) return 1;
+			}
+			off += len;
+		}
+	}
+
+	return 0;
+}
+
 static int iso_root_features(int base, int *has_mdplus, int *has_snes)
 {
 	uint8_t pvd[2048];
@@ -1696,6 +1739,14 @@ physical_disc_disc_t physical_disc_identify()
 		if (!memcmp(iso + 1, "CD-I", 4)) return PHYSICAL_DISC_DISC_CDI;
 	}
 
+	// Original pressed Neo Geo CD releases don't consistently identify
+	// themselves as "NGCD" in the PVD System Identifier. Locate IPL.TXT through
+	// the ISO9660 root directory instead of assuming its directory entry lives
+	// in sectors 16-40, as can happen with simply mastered CD-R images.
+	if (iso_root_has_file(base, "IPL.TXT")) return PHYSICAL_DISC_DISC_NEOGEO;
+
+	// Retain the old bounded raw scan for malformed/non-standard images whose
+	// root directory cannot be parsed normally.
 	for (int s = 16; s <= 40; s++) {
 		uint8_t user[2048];
 		if (physical_disc_read_data2048(base + s, user)) continue;
