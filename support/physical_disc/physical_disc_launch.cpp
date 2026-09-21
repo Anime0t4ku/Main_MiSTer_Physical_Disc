@@ -275,6 +275,13 @@ void physical_disc_launch_startup(void)
 		return;
 	}
 
+	// PSX autoboot: keep the core in reset while the disc is read, so the BIOS
+	// boots once with the game already mounted instead of starting, being reset
+	// by the mount and booting again. Only when a disc is actually present, so
+	// launching the core without a disc still shows the BIOS as before.
+	// psx_mount_cd() releases the hold; it is also released below on failure.
+	if (is_psx() && !physical_disc_open(NULL) && physical_disc_disc_present()) psx_boot_hold(1);
+
 	do
 	{
 		if (physical_disc_mount_current_core())
@@ -288,6 +295,7 @@ void physical_disc_launch_startup(void)
 	}
 	while (!CheckTimer(mount_giveup_at));
 
+	psx_boot_hold(0); // mount failed: never leave the core stuck in reset
 	mount_retry_at = GetTimer(100);
 }
 
