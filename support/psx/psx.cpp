@@ -385,21 +385,15 @@ static int load_phys(toc_t *table)
 	// the physical disc accurately. Drives without usable sub-Q simply keep the
 	// basic TOC and retain the existing fallback behaviour.
 	//
-	// Autoboot: this scan needs one physical reposition + a 256-sector Q read
-	// for every audio track, so on a multi-track disc (data track + many CD-DA
-	// tracks) it can block the mount for close to a minute. Until the mount
-	// completes the core has no disc and sits in the PlayStation BIOS menu.
-	// The game itself lives entirely on track 1, so at boot we hand the core
-	// the complete but basic TOC (all tracks still present, so CD-DA playback
-	// requested by the game keeps working) and let the game start immediately.
-	// The scan is still used for mid-game disc swaps (psx_swap_apply).
-	// Set PSX_PHYS_BOOT_PREGAP_SCAN to 1 to restore the old, slow behaviour.
-#ifndef PSX_PHYS_BOOT_PREGAP_SCAN
-#define PSX_PHYS_BOOT_PREGAP_SCAN 0
-#endif
-#if PSX_PHYS_BOOT_PREGAP_SCAN
+	// This scan needs one physical reposition + a 256-sector Q read per audio
+	// track, so on a multi-track disc it can take a while. It is required for
+	// correct CD-DA playback though: skipping it at boot was tried and breaks
+	// audio entirely on at least some titles (confirmed on real hardware with
+	// Ridge Racer Revolution), so it always runs here. The core is kept in
+	// reset until the mount finishes (see physical_disc_launch_startup /
+	// psx_boot_hold), so the wait is a black screen rather than a visible BIOS
+	// menu detour or a double boot.
 	physical_disc_psx_enrich_toc(table);
-#endif
 
 	apply_disc_bias(table);
 	return 1;
