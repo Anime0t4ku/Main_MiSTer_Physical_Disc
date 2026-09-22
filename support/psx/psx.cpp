@@ -792,6 +792,7 @@ void psx_boot_hold(int hold)
 	hold = hold ? 1 : 0;
 	if (hold == s_boot_hold) return;
 	s_boot_hold = hold;
+	printf("PSX: core reset %s (physical disc autoboot)\n", hold ? "held" : "released");
 	user_io_status_set("[0]", hold);
 }
 
