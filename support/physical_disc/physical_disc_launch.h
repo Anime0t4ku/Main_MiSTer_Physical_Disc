@@ -24,6 +24,13 @@
 
 void physical_disc_launch_startup(void);
 
+// Called by user_io_init() right before it releases the core reset. Returns 1
+// when the current core is the physical disc PlayStation core: the reset is
+// then kept asserted and physical_disc_launch_startup() releases it once the
+// disc has been read (or immediately when there is no disc), so the BIOS boots
+// only once.
+int physical_disc_launch_psx_boot_hold(void);
+
 
 
 void physical_disc_launch_poll(void);
