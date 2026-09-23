@@ -246,6 +246,15 @@ int physical_disc_swap_current_core(void)
 	return 0;
 }
 
+int physical_disc_launch_psx_boot_hold(void)
+{
+	const char *name = user_io_get_core_name();
+	if (!name || strncasecmp(name, "A0CD-", 5) || !is_psx()) return 0;
+
+	psx_boot_hold(1);
+	return 1;
+}
+
 void physical_disc_launch_startup(void)
 {
 	physical_disc_acoustic_config(cfg.physical_disc_acoustic);
@@ -275,6 +284,15 @@ void physical_disc_launch_startup(void)
 		return;
 	}
 
+	// PSX autoboot: user_io_init() kept the core in reset (see
+	// physical_disc_launch_psx_boot_hold) so the BIOS boots once with the game
+	// already mounted instead of starting, being reset by the mount and booting
+	// again. Without a disc there is nothing to wait for: release the core now
+	// and it boots to the normal logo and BIOS menu as before.
+	// With a disc, psx_mount_cd() releases the hold; it is also released below
+	// on failure.
+	if (is_psx() && (physical_disc_open(NULL) || !physical_disc_disc_present())) psx_boot_hold(0);
+
 	do
 	{
 		if (physical_disc_mount_current_core())
@@ -288,6 +306,7 @@ void physical_disc_launch_startup(void)
 	}
 	while (!CheckTimer(mount_giveup_at));
 
+	psx_boot_hold(0); // mount failed: never leave the core stuck in reset
 	mount_retry_at = GetTimer(100);
 }
 

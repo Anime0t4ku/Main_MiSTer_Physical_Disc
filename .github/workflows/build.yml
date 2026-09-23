@@ -1,0 +1,24 @@
+name: Build MiSTer
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ARM toolchain (same as .devcontainer/Dockerfile)
+        run: |
+          wget -qO- "https://developer.arm.com/-/media/Files/downloads/gnu-a/10.2-2020.11/binrel/gcc-arm-10.2-2020.11-x86_64-arm-none-linux-gnueabihf.tar.xz?revision=d0b90559-3960-4e4b-9297-7ddbc3e52783&rev=d0b9055939604e4b92977ddbc3e52783&hash=0074C1529DE90C98726B80ED3EE0776C" | tar -xJ -C /opt
+          echo "$(echo /opt/gcc-arm-*/bin)" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: make
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MiSTer
+          path: bin/MiSTer

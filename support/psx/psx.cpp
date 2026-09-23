@@ -384,6 +384,15 @@ static int load_phys(toc_t *table)
 	// PSX-specific 150-sector bias is applied so track starts/indexes describe
 	// the physical disc accurately. Drives without usable sub-Q simply keep the
 	// basic TOC and retain the existing fallback behaviour.
+	//
+	// This scan needs one physical reposition + a 256-sector Q read per audio
+	// track, so on a multi-track disc it can take a while. It is required for
+	// correct CD-DA playback though: skipping it at boot was tried and breaks
+	// audio entirely on at least some titles (confirmed on real hardware with
+	// Ridge Racer Revolution), so it always runs here. The core is kept in
+	// reset until the mount finishes (see physical_disc_launch_startup /
+	// psx_boot_hold), so the wait is a black screen rather than a visible BIOS
+	// menu detour or a double boot.
 	physical_disc_psx_enrich_toc(table);
 
 	apply_disc_bias(table);
@@ -764,6 +773,23 @@ static int load_bios(const char* filename)
 	return user_io_file_tx(filename, 0xC0);
 }
 
+// Autoboot: user_io_init() releases the core reset before the physical disc is
+// mounted, so the BIOS starts (logo) and is then restarted by the reset request
+// sent with the mount. To avoid that visible double boot, the launcher holds the
+// core in reset while it reads the disc and psx_mount_cd() releases it right
+// before sending the TOC. The hold is only ever taken by the physical disc
+// launcher (see physical_disc_launch_startup) and is a no-op otherwise.
+static int s_boot_hold = 0;
+
+void psx_boot_hold(int hold)
+{
+	hold = hold ? 1 : 0;
+	if (hold == s_boot_hold) return;
+	s_boot_hold = hold;
+	printf("PSX: core reset %s (physical disc autoboot)\n", hold ? "held" : "released");
+	user_io_status_set("[0]", hold);
+}
+
 int psx_mount_cd(int f_index, int s_index, const char *filename)
 {
 	static char last_dir[1024] = {};
@@ -903,6 +929,7 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 
 				process_ss(name, name_len != 0);
 			}
+			psx_boot_hold(0); // disc is ready: let the core start (no-op unless held)
 			send_cue_and_metadata(&toc, mask, region, reset);
 
 			user_io_set_index(f_index);

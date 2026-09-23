@@ -10,5 +10,6 @@ const char* psx_get_game_id();
 void psx_poll();
 void psx_reset();
 void psx_swap_disc();
+void psx_boot_hold(int hold);
 
 #endif
