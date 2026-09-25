@@ -52,6 +52,18 @@ void physical_disc_native_speed(int enable);
 
 
 int physical_disc_disc_present();
+
+// Tray state, read with CDROM_DRIVE_STATUS only: it never spins the disc
+// and never reads data. Works also while no physical disc session is open
+// (a separate O_NONBLOCK handle is kept on the drive for that case).
+typedef enum {
+	PHYSICAL_DISC_TRAY_NODRIVE = -1, // no cd-rom drive found
+	PHYSICAL_DISC_TRAY_EMPTY = 0,    // tray open, or closed with no disc
+	PHYSICAL_DISC_TRAY_NOTREADY = 1, // closed, disc spinning up
+	PHYSICAL_DISC_TRAY_DISC = 2      // closed, disc ready
+} physical_disc_tray_t;
+physical_disc_tray_t physical_disc_tray_status(void);
+void physical_disc_tray_release(void);
 int physical_disc_is_dvd_media(void);
 
 

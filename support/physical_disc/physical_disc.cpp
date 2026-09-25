@@ -730,6 +730,37 @@ int physical_disc_disc_present()
 	return ioctl(drv.dev_fd, CDROM_DRIVE_STATUS, CDSL_CURRENT) == CDS_DISC_OK;
 }
 
+static int tray_fd = -1;
+
+void physical_disc_tray_release(void)
+{
+	if (tray_fd >= 0) { close(tray_fd); tray_fd = -1; }
+}
+
+physical_disc_tray_t physical_disc_tray_status(void)
+{
+	int fd = drv.dev_fd;
+	if (fd < 0) {
+		if (tray_fd < 0) {
+			char dev[64];
+			tray_fd = find_drive(dev, sizeof(dev));
+			if (tray_fd < 0) return PHYSICAL_DISC_TRAY_NODRIVE;
+		}
+		fd = tray_fd;
+	}
+	else physical_disc_tray_release();
+
+	int st = ioctl(fd, CDROM_DRIVE_STATUS, CDSL_CURRENT);
+	if (st < 0) {
+		// drive unplugged or reset: look for it again next time
+		if (fd == tray_fd) physical_disc_tray_release();
+		return PHYSICAL_DISC_TRAY_NODRIVE;
+	}
+	if (st == CDS_DISC_OK) return PHYSICAL_DISC_TRAY_DISC;
+	if (st == CDS_DRIVE_NOT_READY) return PHYSICAL_DISC_TRAY_NOTREADY;
+	return PHYSICAL_DISC_TRAY_EMPTY; // CDS_TRAY_OPEN, CDS_NO_DISC, CDS_NO_INFO
+}
+
 int physical_disc_is_dvd_media(void)
 {
 	if (drv.dev_fd < 0 || !physical_disc_disc_present()) return 0;
