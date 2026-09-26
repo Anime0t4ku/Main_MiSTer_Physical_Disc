@@ -545,6 +545,7 @@ static int s_swap_eject_notified = 0;
 static int s_wait_disc = 0;        // phys mode active, no disc mounted
 static int s_wait_armed = 0;       // tray seen open/empty since the last try
 static int s_wait_retries = 0;     // mount attempts left after a tray close
+static int s_hot_insert = 0;       // mount comes from a tray close: never reset the core
 static unsigned long s_wait_next = 0;
 #define CD_SECTOR_LEN 2352
 
@@ -873,7 +874,10 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 						strcat(last_dir, "/noreset.txt");
 						noreset = FileExists(last_dir);
 					}
-					reset = !noreset;
+					// A disc inserted while the core runs (tray close) is handled like on a real
+					// PSX: the BIOS reads it (CD player shows the tracks) and the game boots
+					// only when the user leaves the shell, so the core is not reset.
+					reset = !noreset && !s_hot_insert;
 
 					strcpy(last_dir, name);
 					char *p = strrchr(last_dir, '/');
@@ -1057,7 +1061,10 @@ static void psx_wait_disc_poll()
 
 	printf("PSX: tray closed with a disc, reading it\n");
 	physical_disc_tray_release();
-	if (psx_mount_cd(s_swap_fidx, s_swap_sidx, PHYSICAL_DISC_SENTINEL))
+	s_hot_insert = 1;
+	int mounted = psx_mount_cd(s_swap_fidx, s_swap_sidx, PHYSICAL_DISC_SENTINEL);
+	s_hot_insert = 0;
+	if (mounted)
 	{
 		s_wait_armed = 0;
 		s_wait_retries = 0;
