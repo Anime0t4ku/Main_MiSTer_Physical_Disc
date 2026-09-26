@@ -6,6 +6,7 @@
 
 #include "../../file_io.h"
 #include "../physical_disc/physical_disc.h"
+#include "../physical_disc/physical_disc_launch.h"
 #include "../../user_io.h"
 #include "../../spi.h"
 #include "../../hardware.h"
@@ -537,6 +538,15 @@ static toc_t toc = {};
 static int s_swap_fidx = 1, s_swap_sidx = 1;
 static region_t s_swap_region = UNKNOWN;
 static int s_swap_eject_notified = 0;
+
+// Physical disc mode with an empty (or unreadable) drive: like the lid of a
+// real PSX, the drive tray is watched and the disc is read only when the tray
+// is closed with a disc inside. Applies to PSX game discs and audio CDs alike.
+static int s_wait_disc = 0;        // phys mode active, no disc mounted
+static int s_wait_armed = 0;       // tray seen open/empty since the last try
+static int s_wait_retries = 0;     // mount attempts left after a tray close
+static int s_hot_insert = 0;       // mount comes from a tray close: never reset the core
+static unsigned long s_wait_next = 0;
 #define CD_SECTOR_LEN 2352
 
 int psx_chd_hunksize()
@@ -798,6 +808,7 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 	int phys = !strcmp(filename, PHYSICAL_DISC_SENTINEL);
 	physical_disc_swap_enable(0);   
 	if (phys) { s_swap_fidx = f_index; s_swap_sidx = s_index; s_swap_eject_notified = 0; }
+	s_wait_disc = 0;
 
 	if (strlen(filename))
 	{
@@ -863,7 +874,10 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 						strcat(last_dir, "/noreset.txt");
 						noreset = FileExists(last_dir);
 					}
-					reset = !noreset;
+					// A disc inserted while the core runs (tray close) is handled like on a real
+					// PSX: the BIOS reads it (CD player shows the tracks) and the game boots
+					// only when the user leaves the shell, so the core is not reset.
+					reset = !noreset && !s_hot_insert;
 
 					strcpy(last_dir, name);
 					char *p = strrchr(last_dir, '/');
@@ -950,7 +964,15 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 		unload_cue(&toc);
 		unload_chd(&toc);
 		mount_cd(0, s_index);
+
+		// physical disc mode without a readable disc: wait for the tray
+		if (phys)
+		{
+			s_wait_disc = 1;
+			s_wait_next = GetTimer(500);
+		}
 	}
+	else physical_disc_tray_release();
 
 
 	return loaded;
@@ -1005,8 +1027,64 @@ void psx_swap_disc()
 	psx_swap_apply();
 }
 
+// Watch the tray while the physical disc core runs with no disc mounted.
+// Only the tray state is read (no spin-up, no data read); the disc itself is
+// read once, when the tray goes from open/empty to closed with a disc.
+static void psx_wait_disc_poll()
+{
+	if (!s_wait_disc || toc.phys || physical_disc_launch_busy()) return;
+	if (!CheckTimer(s_wait_next)) return;
+	s_wait_next = GetTimer(500);
+
+	physical_disc_tray_t st = physical_disc_tray_status();
+	switch (st)
+	{
+	case PHYSICAL_DISC_TRAY_NODRIVE:
+		s_wait_next = GetTimer(5000);
+		return;
+
+	case PHYSICAL_DISC_TRAY_EMPTY:
+		if (!s_wait_armed) printf("PSX: tray open/empty, waiting for a disc\n");
+		s_wait_armed = 1;
+		s_wait_retries = 0;
+		return;
+
+	case PHYSICAL_DISC_TRAY_NOTREADY:
+		s_wait_armed = 1; // tray just closed, disc spinning up
+		return;
+
+	case PHYSICAL_DISC_TRAY_DISC:
+		if (!s_wait_armed) return; // unreadable disc still inside: open/close to retry
+		if (!s_wait_retries) s_wait_retries = 10;
+		break;
+	}
+
+	printf("PSX: tray closed with a disc, reading it\n");
+	physical_disc_tray_release();
+	s_hot_insert = 1;
+	int mounted = psx_mount_cd(s_swap_fidx, s_swap_sidx, PHYSICAL_DISC_SENTINEL);
+	s_hot_insert = 0;
+	if (mounted)
+	{
+		s_wait_armed = 0;
+		s_wait_retries = 0;
+		return;
+	}
+
+	// TOC not readable yet right after the close: retry for a few seconds
+	s_wait_next = GetTimer(1000);
+	if (--s_wait_retries <= 0)
+	{
+		printf("PSX: disc could not be read, open and close the tray to retry\n");
+		Info("Disc could not be read", 3000);
+		s_wait_armed = 0;
+	}
+}
+
 void psx_poll()
 {
+	psx_wait_disc_poll();
+
 	if (toc.phys)
 	{
 		if (physical_disc_swap_consume())
