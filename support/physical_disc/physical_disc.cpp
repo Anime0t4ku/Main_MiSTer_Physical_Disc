@@ -888,6 +888,19 @@ static int scsi_read_raw_subq_block(int lba, int count, uint8_t *sub)
 }
 
 
+/* Raw P-W subchannel only (no sector data) of count sectors from lba, for the
+ * PSX LibCrypt key (support/psx/psx_libcrypt.cpp). Returns 0 on success.
+ */
+int physical_disc_read_subq_window(int lba, int count, uint8_t *raw96)
+{
+	if (drv.dev_fd < 0 || drv.mid_swap || lba < 0 || count <= 0 || count > 64) return -1;
+	if (drv.leadout_lba > 0 && lba + count > drv.leadout_lba) return -1;
+	pthread_mutex_lock(&drv.io_lock);
+	int r = scsi_read_raw_subq_block(lba, count, raw96);
+	pthread_mutex_unlock(&drv.io_lock);
+	return r;
+}
+
 static void raw_subq_decode(const uint8_t *raw, uint8_t *q)
 {
 	for (int b = 0; b < 12; b++) {
