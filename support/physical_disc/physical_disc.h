@@ -121,6 +121,11 @@ int physical_disc_read_sector_sub(int lba, uint8_t *dst, uint8_t *sub96);
 
 int physical_disc_read_data2048(int lba, uint8_t *dst);
 
+/* Raw P-W subchannel only of count (<= 64) sectors from lba (drive LBA), for
+ * the PSX LibCrypt key. Returns 0 on success.
+ */
+int physical_disc_read_subq_window(int lba, int count, uint8_t *raw96);
+
 
 
 

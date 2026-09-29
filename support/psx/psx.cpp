@@ -12,6 +12,7 @@
 #include "../../hardware.h"
 #include "../../menu.h"
 #include "psx.h"
+#include "psx_libcrypt.h"
 #include "mcdheader.h"
 #include "../../cd.h"
 #include "../chd/mister_chd.h"
@@ -800,6 +801,117 @@ void psx_boot_hold(int hold)
 	user_io_status_set("[0]", hold);
 }
 
+// ---------------------------------------------------------------------------- LibCrypt key
+// The key normally comes from an .sbi file. Without one, it is read from the real
+// subchannel of the 32 LibCrypt sectors, when the disc or the image has it
+// (see psx_libcrypt.h). The core gets the same key it would get from the .sbi.
+
+static int lc_read_drive(void *, int lba, int count, uint8_t *raw96)
+{
+	return physical_disc_read_subq_window(lba, count, raw96);
+}
+
+static int lc_read_chd(void *, uint32_t frame, uint8_t *sub96)
+{
+	// frames of the data track, as the core numbers them (first track starts at 150)
+	if (!toc.chd_f || !chd_hunkbuf || frame < 150 || (int)frame > toc.tracks[0].end) return -1;
+	int lba = (int)frame - toc.tracks[0].indexes[1] + toc.tracks[0].offset;
+	return mister_chd_read_sector(toc.chd_f, lba, 0, CD_SECTOR_LEN, 96, sub96, chd_hunkbuf, &chd_hunknum) != CHDERR_NONE;
+}
+
+static int lc_read_subfile(void *ctx, uint32_t frame, uint8_t *sub96)
+{
+	fileTYPE *f = (fileTYPE *)ctx;
+	if (frame < 150) return -1;
+	if (!FileSeek(f, (__off64_t)(frame - 150) * 96, SEEK_SET)) return -1;
+	return FileReadAdv(f, sub96, 96) != 96;
+}
+
+static uint16_t libCryptMaskFromSubchannel(int phys, const char *filename)
+{
+	int8_t st[PSX_LC_SECTORS];
+	int strict = 0;
+	const char *src;
+
+	if (phys)
+	{
+		unsigned long t0 = GetTimer(0);
+		int reads = psx_lc_scan_drive(lc_read_drive, NULL, st);
+		if (reads <= 0)
+		{
+			printf("LibCrypt: the drive returns no subchannel, key not read from the disc\n");
+			return 0;
+		}
+		printf("LibCrypt: %d subchannel reads in %lu ms\n", reads, GetTimer(0) - t0);
+		strict = 1;
+		src = "disc subchannel";
+	}
+	else if (toc.chd_f)
+	{
+		if (toc.tracks[0].sbc_type == SUBCODE_NONE) return 0;
+		if (!psx_lc_scan_image(lc_read_chd, NULL, 2, st)) return 0;
+		src = "CHD subchannel";
+	}
+	else
+	{
+		// CloneCD style .sub next to the image, 96 bytes per sector from LBA 0
+		if (!filename || !*filename) return 0;
+		char path[1024];
+		snprintf(path, sizeof(path), "%s", filename);
+		char *ext = strrchr(path, '.');
+		char *slash = strrchr(path, '/');
+		if (!ext || (slash && ext < slash) || (size_t)(ext - path) + 5 > sizeof(path)) return 0;
+		strcpy(ext, ".sub");
+		fileTYPE f = {};
+		if (!FileOpen(&f, path, 1)) return 0;
+		int n = psx_lc_scan_image(lc_read_subfile, &f, 0, st);
+		FileClose(&f);
+		if (!n) return 0;
+		src = ".sub file";
+	}
+
+	uint16_t key = psx_lc_key(st, strict);
+	char map[PSX_LC_SECTORS + 1];
+	for (int i = 0; i < PSX_LC_SECTORS; i++) map[i] = st[i] == PSX_LC_BAD ? 'X' : (st[i] == PSX_LC_GOOD ? '.' : '?');
+	map[PSX_LC_SECTORS] = 0;
+	printf("LibCrypt: key %04X from the %s [%s]\n", key, src, map);
+	return key;
+}
+
+// .sbi first (sbi.zip by game ID, then next to the image), then the subchannel
+static uint16_t libCryptKey(const char *game_id, int phys, const char *filename, int try_subchannel)
+{
+	fileTYPE sbi_file = {};
+	bool has_sbi_file = false;
+	uint16_t mask = 0;
+
+	// search for .sbi file in PSX/sbi.zip
+	if (game_id && game_id[0])
+	{
+		sprintf(buf, "%s/sbi.zip/%s.sbi", HomeDir(), game_id);
+		has_sbi_file = FileOpen(&sbi_file, buf, 1);
+	}
+
+	if (!has_sbi_file && !phys && filename)
+	{
+		// search for .sbi file base on image name
+		int name_len = strlen(filename);
+		strcpy(buf, filename);
+		strcpy((name_len > 4) ? buf + name_len - 4 : buf + name_len, ".sbi");
+		has_sbi_file = FileOpen(&sbi_file, buf, 1);
+	}
+
+	if (has_sbi_file)
+	{
+		printf("Found SBI file: %s\n", buf);
+		mask = libCryptMask(&sbi_file);
+		FileClose(&sbi_file);
+		return mask;
+	}
+
+	return try_subchannel ? libCryptMaskFromSubchannel(phys, filename) : 0;
+}
+
 int psx_mount_cd(int f_index, int s_index, const char *filename)
 {
 	static char last_dir[1024] = {};
@@ -921,25 +1033,8 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 
 			if (!audio_only)
 			{
-				fileTYPE sbi_file = {};
-				bool has_sbi_file = false;
-			// search for .sbi file in PSX/sbi.zip
-				sprintf(buf, "%s/sbi.zip/%s.sbi", HomeDir(), game_id);
-				has_sbi_file = FileOpen(&sbi_file, buf, 1);
-
-				if (!has_sbi_file && !phys)
-				{
-				// search for .sbi file base on image name
-					strcpy(buf, filename);
-					strcpy((name_len > 4) ? buf + name_len - 4 : buf + name_len, ".sbi");
-					has_sbi_file = FileOpen(&sbi_file, buf, 1);
-				}
-
-				if (has_sbi_file)
-				{
-					printf("Found SBI file: %s\n", buf);
-					mask = libCryptMask(&sbi_file);
-				}
+				// LibCrypt key: .sbi, or the real subchannel of the disc/image (data discs only)
+				mask = libCryptKey(game_id, phys, phys ? NULL : filename, toc.tracks[0].type != 0);
 
 				process_ss(name, name_len != 0);
 			}
@@ -1001,8 +1096,17 @@ static void psx_swap_apply()
 
 
 
+	// LibCrypt key of the new disc (multi-disc games have it on every disc)
+	uint16_t mask = 0;
+	if (!physical_disc_toc_audio_only(&toc))
+	{
+		game_info_t gi = psx_get_game_info();
+		printf("PSX: disc swap -> game ID %s\n", gi.game_id);
+		mask = libCryptKey(gi.game_id, 1, NULL, toc.tracks[0].type != 0);
+	}
+
 	printf("PSX: disc swap -> region %s\n", region_string(region));
-	send_cue_and_metadata(&toc, 0, region, 0);
+	send_cue_and_metadata(&toc, mask, region, 0);
 	user_io_set_index(s_swap_fidx);
 	mount_cd(toc.end * CD_SECTOR_LEN, s_swap_sidx);
 	s_swap_eject_notified = 0;
