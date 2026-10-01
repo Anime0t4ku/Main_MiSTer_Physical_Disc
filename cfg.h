@@ -45,6 +45,7 @@ typedef struct {
 	uint8_t physical_disc_launch;	
 	uint8_t physical_disc_mount_delay;	
 	uint8_t physical_disc_acoustic;	
+	uint8_t physical_disc_boot;
 	char physical_disc_audio_cd[32];
 	char physical_disc_dvd[32];
 	int16_t bootcore_timeout;
