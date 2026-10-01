@@ -76,6 +76,7 @@ static const ini_var_t ini_vars[] =
 	{ "PHYSICAL_DISC_MGL", (void*)(&(cfg.physical_disc_launch)), UINT8, 0, 1 },
 	{ "PHYSICAL_DISC_MOUNT_DELAY", (void*)(&(cfg.physical_disc_mount_delay)), UINT8, 0, 30 },
 	{ "PHYSICAL_DISC_ACOUSTIC", (void*)(&(cfg.physical_disc_acoustic)), UINT8, 0, 1 },
+	{ "PHYSICAL_DISC_BOOT", (void*)(&(cfg.physical_disc_boot)), UINT8, 0, 1 },
 	{ "AUDIOCD", (void*)(cfg.physical_disc_audio_cd), STRING, 0, sizeof(cfg.physical_disc_audio_cd) - 1 },
 	{ "DVD", (void*)(cfg.physical_disc_dvd), STRING, 0, sizeof(cfg.physical_disc_dvd) - 1 },
 	{ "FONT", (void*)(&(cfg.font)), STRING, 0, sizeof(cfg.font) - 1 },
@@ -619,6 +620,7 @@ void cfg_parse()
 	cfg.physical_disc_launch = 1;	
 	cfg.physical_disc_mount_delay = 2;	
 	cfg.physical_disc_acoustic = 0;	
+	cfg.physical_disc_boot = 0;
 	strcpy(cfg.physical_disc_audio_cd, "PSX");
 	cfg.video_brightness = 50;
 	cfg.video_contrast = 50;

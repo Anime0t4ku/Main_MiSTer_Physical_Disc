@@ -87,7 +87,7 @@ When enabled:
 3. Physical Disc Support identifies the disc.
 4. The appropriate core is launched automatically.
 
-A disc that is already inserted when MiSTer starts is not automatically launched. Auto Disc Detection reacts to a disc being inserted after MiSTer has started.
+A disc that is already inserted when MiSTer starts is not automatically launched. Auto Disc Detection reacts to a disc being inserted after MiSTer has started, unless **Launch at Power-On** is enabled (see below).
 
 MiSTer Companion provides an easy option to enable or disable Auto Disc Detection without manually editing `MiSTer.ini`.
 
@@ -118,6 +118,20 @@ For example:
 [menu]
 main=MiSTer_Physical-CD
 ```
+
+### Launch at Power-On
+
+To launch a disc that is already in the drive when MiSTer is switched on, like a console switched on with a disc inside, add `PHYSICAL_DISC_BOOT=1` to your `[menu]` section, next to the Auto Disc Detection entry:
+
+```ini
+[menu]
+main=MiSTer_Physical-CD
+PHYSICAL_DISC_BOOT=1
+```
+
+At power-on (or after a reboot) MiSTer starts as usual and shows the menu; Auto Disc Detection then waits for the drive to spin up the disc (up to 30 seconds), identifies it and launches the matching Physical Disc core, exactly as if the disc had just been inserted.
+
+It only applies once per power-on: when you leave a core and return to the menu with the same disc still inside, it is not launched again. Remove the line, or set `PHYSICAL_DISC_BOOT=0`, to turn it off. It requires Auto Disc Detection. With a `bootcore=` option the menu is reached later, and the disc is launched the first time the menu is shown after power-on.
 
 ## Audio CD Override
 
