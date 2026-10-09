@@ -10,6 +10,7 @@
 #include "../../hardware.h"
 #include "../../menu.h"
 #include "../../cheats.h"
+#include "../../cfg.h"
 #include "megacd.h"
 #include "../physical_disc/physical_disc.h"
 
@@ -47,7 +48,18 @@ void mcd_poll()
 
 	if (!poll_timer || CheckTimer(poll_timer))
 	{
-		if (!cdd.isData && cdd.status == CD_STAT_PLAY && cdd.latency == 0) {
+		if (!cdd.isData && cdd.status == CD_STAT_PLAY && cdd.latency == 0 && cfg.megacd_cdda_paced) {
+			// MEGACD_CDDA_PACED=1: one audio sector (and its subcode) every 13.25 ms (13,13,13,14), close to
+			// the 75 sectors per second of a real drive, so the subcode reaches the BIOS at a steady rate (CD+G).
+			// The next poll is set from the previous one, so a late poll is caught up; slightly faster than
+			// 75 Hz so the audio buffer stays filled.
+			static uint8_t paced_adj = 0;
+			uint32_t next = poll_timer + 13 + (paced_adj == 3 ? 1 : 0);
+			if (++paced_adj >= 4) paced_adj = 0;
+			if (CheckTimer(next + 50)) next = GetTimer(13);
+			poll_timer = next;
+			adj = 0;
+		} else if (!cdd.isData && cdd.status == CD_STAT_PLAY && cdd.latency == 0) {
 			// Send audio sectors faster so buffer stays filled
 			poll_timer = GetTimer(10);
 			adj = 0;

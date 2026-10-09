@@ -75,8 +75,8 @@ static char sublog_buf[SUBCODE_LOG_BUFSIZE];
 static int sublog_len = 0;
 static int sublog_dropped = 0;
 
-// Raw copy of 22500 consecutive sectors (5 minutes) of subcode from the first CD+G pack, 96 bytes each,
-// to check the R-W data offline. Filled by the main loop, written once by the writer thread.
+// Raw copy of up to 22500 consecutive sectors (5 minutes) of subcode from the first CD+G pack, 96 bytes
+// each, to check the R-W data offline. Filled by the main loop, saved by the writer thread.
 static uint8_t sublog_raw[SUBCODE_RAW_COUNT][96];
 static int sublog_raw_count = 0;
 static int sublog_raw_written = 0;
@@ -122,19 +122,20 @@ static void SubcodeLogWrite()
 	if (len || dropped) fflush(sublog_f);
 }
 
-// Writes the raw subcode copy once it is complete. Only called from the writer thread, or after it has stopped.
+// Appends the raw subcode sectors captured since the last call, so the file is there even if the
+// disc stops before the capture is complete. Only called from the writer thread, or after it has stopped.
 static void SubcodeLogWriteRaw()
 {
-	if (sublog_raw_written || __atomic_load_n(&sublog_raw_count, __ATOMIC_ACQUIRE) < SUBCODE_RAW_COUNT) return;
+	int count = __atomic_load_n(&sublog_raw_count, __ATOMIC_ACQUIRE);
+	if (count <= sublog_raw_written) return;
 
-	FILE *raw = fopen(SUBCODE_RAW_PATH, "wb");
-	if (raw)
-	{
-		fwrite(sublog_raw, 96, SUBCODE_RAW_COUNT, raw);
-		fclose(raw);
-		SubcodeLogPrintf("raw subcode of %d sectors written to %s\n", SUBCODE_RAW_COUNT, SUBCODE_RAW_PATH);
-	}
-	sublog_raw_written = 1;
+	FILE *raw = fopen(SUBCODE_RAW_PATH, sublog_raw_written ? "ab" : "wb");
+	if (!raw) return;
+
+	fwrite(sublog_raw[sublog_raw_written], 96, count - sublog_raw_written, raw);
+	fclose(raw);
+	sublog_raw_written = count;
+	if (count == SUBCODE_RAW_COUNT) SubcodeLogPrintf("raw subcode of %d sectors written to %s\n", count, SUBCODE_RAW_PATH);
 }
 
 static void *SubcodeLogThread(void *)

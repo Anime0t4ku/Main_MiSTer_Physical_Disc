@@ -231,6 +231,10 @@ MEGACD_SUBCODE_LOG=1
 
 While a disc plays, `/media/fat/logs/megacd_subcode.log` gets one entry per second with the subcode sent to the core: sectors with and without subcode, how many Q position frames are valid, how many CD+G graphics packs were found, and one sector in hex. The file is rewritten each time a disc is mounted. Remove the line, or set `MEGACD_SUBCODE_LOG=0`, to turn it off.
 
+With the log on, `/media/fat/logs/megacd_subcode_raw.bin` also gets the raw subcode (96 bytes per sector) from the first CD+G pack onwards, up to 5 minutes, saved every second, so the graphics data can be checked on a PC.
+
+If the graphics show glitches, try `MEGACD_CDDA_PACED=1` in the same section. It sends audio sectors, and their subcode, to the core at a steady 75 sectors per second like a real drive, instead of in short bursts.
+
 ## Burning SNES MSU-1 & Mega Drive / Genesis MD+ CDs
 
 For users who want to create physical discs for **SNES MSU-1** or **Mega Drive / Genesis MD+**, a dedicated burning tutorial is included with the project.
