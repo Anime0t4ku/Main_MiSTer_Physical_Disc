@@ -5,6 +5,9 @@
 #include <inttypes.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <stdarg.h>
+#include <pthread.h>
+#include <unistd.h>
 
 #include "megacd.h"
 #include "../../cfg.h"
@@ -16,11 +19,88 @@ cdd_t cdd;
 // MEGACD_SUBCODE_LOG=1 in MiSTer.ini: once per second of playback, write a summary of the
 // subcode sent to the core, to check CD+G discs. The core gets raw P-W, one byte per symbol
 // (bit 7 = P, bit 6 = Q, bits 5..0 = R..W), 4 packs of 24 symbols per sector.
+// The main loop only fills a memory buffer: a separate thread writes it to the SD card, so a
+// slow SD write never delays the sectors sent to the core.
 #define SUBCODE_LOG_DIR    "/media/fat/logs"
 #define SUBCODE_LOG_PATH   SUBCODE_LOG_DIR "/megacd_subcode.log"
 #define SUBCODE_LOG_WINDOW 75
+#define DRIVE_STATS_PATH   "/tmp/physical_disc_stats.log"
+
+#define SUBCODE_LOG_BUFSIZE 32768
 
 static FILE *sublog_f = NULL;
+static int sublog_phys = 0;
+
+static pthread_t sublog_thread;
+static pthread_mutex_t sublog_lock = PTHREAD_MUTEX_INITIALIZER;
+static int sublog_stop = 0;
+static char sublog_buf[SUBCODE_LOG_BUFSIZE];
+static int sublog_len = 0;
+static int sublog_dropped = 0;
+
+static void SubcodeLogPrintf(const char *fmt, ...)
+{
+	char line[512];
+	va_list args;
+	va_start(args, fmt);
+	int n = vsnprintf(line, sizeof(line), fmt, args);
+	va_end(args);
+	if (n <= 0) return;
+	if (n >= (int)sizeof(line)) n = sizeof(line) - 1;
+
+	pthread_mutex_lock(&sublog_lock);
+	if (sublog_len + n <= SUBCODE_LOG_BUFSIZE)
+	{
+		memcpy(sublog_buf + sublog_len, line, n);
+		sublog_len += n;
+	}
+	else
+	{
+		sublog_dropped += n;
+	}
+	pthread_mutex_unlock(&sublog_lock);
+}
+
+// Writes the buffered text to the SD card. Only called from the writer thread, or after it has stopped.
+static void SubcodeLogWrite()
+{
+	static char out[SUBCODE_LOG_BUFSIZE];
+
+	pthread_mutex_lock(&sublog_lock);
+	int len = sublog_len;
+	int dropped = sublog_dropped;
+	memcpy(out, sublog_buf, len);
+	sublog_len = 0;
+	sublog_dropped = 0;
+	pthread_mutex_unlock(&sublog_lock);
+
+	if (len) fwrite(out, 1, len, sublog_f);
+	if (dropped) fprintf(sublog_f, "(log buffer full, %d bytes lost)\n", dropped);
+	if (len || dropped) fflush(sublog_f);
+}
+
+static void *SubcodeLogThread(void *)
+{
+	int ticks = 0;
+	while (!__atomic_load_n(&sublog_stop, __ATOMIC_ACQUIRE))
+	{
+		usleep(200 * 1000);
+		if (++ticks % 5) continue;
+
+		// Physical disc: every 5 seconds also copy the drive read statistics (cache misses,
+		// sectors read as zeros), which the drive thread rewrites every 5 seconds
+		FILE *stats = (sublog_phys && !(ticks % 25)) ? fopen(DRIVE_STATS_PATH, "r") : NULL;
+		if (stats)
+		{
+			char line[256];
+			while (fgets(line, sizeof(line), stats)) SubcodeLogPrintf("  drive: %s", line);
+			fclose(stats);
+		}
+
+		SubcodeLogWrite();
+	}
+	return NULL;
+}
 
 static struct
 {
@@ -49,44 +129,45 @@ static void SubcodeLogFlush()
 {
 	if (!sublog_f || !(sublog.sent + sublog.missing)) return;
 
-	fprintf(sublog_f, "lba %d-%d: sent %d, missing %d, Q crc ok %d, packs: graphics %d, empty %d, other %d\n",
+	SubcodeLogPrintf("lba %d-%d: sent %d, missing %d, Q crc ok %d, packs: graphics %d, empty %d, other %d\n",
 		sublog.first_lba, sublog.last_lba, sublog.sent, sublog.missing, sublog.q_ok,
 		sublog.cdg_packs, sublog.empty_packs, sublog.other_packs);
 
 	if (sublog.missing || sublog.q_ok < sublog.sent)
 	{
-		fprintf(sublog_f, "  first missing lba %d, first Q crc error lba %d\n", sublog.missing ? sublog.first_missing : -1, (sublog.q_ok < sublog.sent) ? sublog.first_bad_q : -1);
+		SubcodeLogPrintf("  first missing lba %d, first Q crc error lba %d\n", sublog.missing ? sublog.first_missing : -1, (sublog.q_ok < sublog.sent) ? sublog.first_bad_q : -1);
 	}
 
 	if (sublog.jumps)
 	{
-		fprintf(sublog_f, "  not in sequence: %d time(s), first %d -> %d\n", sublog.jumps, sublog.jump_from, sublog.jump_to);
+		SubcodeLogPrintf("  not in sequence: %d time(s), first %d -> %d\n", sublog.jumps, sublog.jump_from, sublog.jump_to);
 	}
 
 	if (sublog.have_q)
 	{
 		const uint8_t *q = sublog.q;
-		fprintf(sublog_f, "  last Q: ctrl/adr %02X track %02X index %02X rel %02X:%02X:%02X abs %02X:%02X:%02X\n",
+		SubcodeLogPrintf("  last Q: ctrl/adr %02X track %02X index %02X rel %02X:%02X:%02X abs %02X:%02X:%02X\n",
 			q[0], q[1], q[2], q[3], q[4], q[5], q[7], q[8], q[9]);
 	}
 
 	if (sublog.have_raw)
 	{
-		fprintf(sublog_f, "  raw lba %d:", sublog.first_lba);
-		for (int i = 0; i < 96; i++) fprintf(sublog_f, "%s%02X", (i % 24) ? "" : " ", sublog.raw[i]);
-		fprintf(sublog_f, "\n");
+		char hex[96 * 2 + 4 + 1];
+		int pos = 0;
+		for (int i = 0; i < 96; i++) pos += sprintf(hex + pos, "%s%02X", (i % 24) ? "" : " ", sublog.raw[i]);
+		SubcodeLogPrintf("  raw lba %d:%s\n", sublog.first_lba, hex);
 	}
-
-	fflush(sublog_f);
 
 	int prev_lba = sublog.prev_lba;
 	memset(&sublog, 0, sizeof(sublog));
 	sublog.prev_lba = prev_lba;
 }
 
-static void SubcodeLogOpen(const char *source)
+static void SubcodeLogOpen(const char *source, int phys)
 {
 	if (sublog_f || !cfg.megacd_subcode_log) return;
+
+	sublog_phys = phys;
 
 	mkdir(SUBCODE_LOG_DIR, 0777);
 	sublog_f = fopen(SUBCODE_LOG_PATH, "w");
@@ -102,6 +183,17 @@ static void SubcodeLogOpen(const char *source)
 	fprintf(sublog_f, "graphics = CD+G/CD+EG packs (mode/item 09 or 0A), empty = 00, Q crc ok = position data read correctly\n");
 	fprintf(sublog_f, "not in sequence = subcode lba not following the previous one (seek, or a sector skipped or repeated)\n");
 	fflush(sublog_f);
+
+	sublog_len = 0;
+	sublog_dropped = 0;
+	__atomic_store_n(&sublog_stop, 0, __ATOMIC_RELEASE);
+	if (pthread_create(&sublog_thread, NULL, SubcodeLogThread, NULL))
+	{
+		printf("\x1b[32mMCD: cannot start the subcode log thread\n\x1b[0m");
+		fclose(sublog_f);
+		sublog_f = NULL;
+		return;
+	}
 	printf("\x1b[32mMCD: subcode log in %s\n\x1b[0m", SUBCODE_LOG_PATH);
 }
 
@@ -110,6 +202,9 @@ static void SubcodeLogClose()
 	if (!sublog_f) return;
 
 	SubcodeLogFlush();
+	__atomic_store_n(&sublog_stop, 1, __ATOMIC_RELEASE);
+	pthread_join(sublog_thread, NULL);
+	SubcodeLogWrite();
 	fclose(sublog_f);
 	sublog_f = NULL;
 }
@@ -488,7 +583,7 @@ int cdd_t::Load(const char *filename)
 
 		printf("\x1b[32mMCD: CD mounted , last track = %u\n\x1b[0m", this->toc.last);
 
-		SubcodeLogOpen(this->toc.phys ? "physical disc" : this->toc.chd_f ? "CHD" : this->toc.sub.opened() ? "CUE + .sub" : "CUE, no subcode");
+		SubcodeLogOpen(this->toc.phys ? "physical disc" : this->toc.chd_f ? "CHD" : this->toc.sub.opened() ? "CUE + .sub" : "CUE, no subcode", this->toc.phys);
 
 		return 1;
 	}
