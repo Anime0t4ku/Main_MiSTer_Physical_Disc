@@ -25,6 +25,8 @@ cdd_t cdd;
 #define SUBCODE_LOG_PATH   SUBCODE_LOG_DIR "/megacd_subcode.log"
 #define SUBCODE_LOG_WINDOW 75
 #define DRIVE_STATS_PATH   "/tmp/physical_disc_stats.log"
+#define SUBCODE_RAW_PATH   SUBCODE_LOG_DIR "/megacd_subcode_raw.bin"
+#define SUBCODE_RAW_COUNT  1500
 
 #define SUBCODE_LOG_BUFSIZE 32768
 
@@ -37,6 +39,12 @@ static int sublog_stop = 0;
 static char sublog_buf[SUBCODE_LOG_BUFSIZE];
 static int sublog_len = 0;
 static int sublog_dropped = 0;
+
+// Raw copy of 1500 consecutive sectors (20 s) of subcode from the first CD+G pack, 96 bytes each,
+// to check the R-W data offline. Filled by the main loop, written once by the writer thread.
+static uint8_t sublog_raw[SUBCODE_RAW_COUNT][96];
+static int sublog_raw_count = 0;
+static int sublog_raw_written = 0;
 
 static void SubcodeLogPrintf(const char *fmt, ...)
 {
@@ -79,6 +87,21 @@ static void SubcodeLogWrite()
 	if (len || dropped) fflush(sublog_f);
 }
 
+// Writes the raw subcode copy once it is complete. Only called from the writer thread, or after it has stopped.
+static void SubcodeLogWriteRaw()
+{
+	if (sublog_raw_written || __atomic_load_n(&sublog_raw_count, __ATOMIC_ACQUIRE) < SUBCODE_RAW_COUNT) return;
+
+	FILE *raw = fopen(SUBCODE_RAW_PATH, "wb");
+	if (raw)
+	{
+		fwrite(sublog_raw, 96, SUBCODE_RAW_COUNT, raw);
+		fclose(raw);
+		SubcodeLogPrintf("raw subcode of %d sectors written to %s\n", SUBCODE_RAW_COUNT, SUBCODE_RAW_PATH);
+	}
+	sublog_raw_written = 1;
+}
+
 static void *SubcodeLogThread(void *)
 {
 	int ticks = 0;
@@ -97,6 +120,7 @@ static void *SubcodeLogThread(void *)
 			fclose(stats);
 		}
 
+		SubcodeLogWriteRaw();
 		SubcodeLogWrite();
 	}
 	return NULL;
@@ -186,6 +210,8 @@ static void SubcodeLogOpen(const char *source, int phys)
 
 	sublog_len = 0;
 	sublog_dropped = 0;
+	sublog_raw_count = 0;
+	sublog_raw_written = 0;
 	__atomic_store_n(&sublog_stop, 0, __ATOMIC_RELEASE);
 	if (pthread_create(&sublog_thread, NULL, SubcodeLogThread, NULL))
 	{
@@ -204,6 +230,7 @@ static void SubcodeLogClose()
 	SubcodeLogFlush();
 	__atomic_store_n(&sublog_stop, 1, __ATOMIC_RELEASE);
 	pthread_join(sublog_thread, NULL);
+	SubcodeLogWriteRaw();
 	SubcodeLogWrite();
 	fclose(sublog_f);
 	sublog_f = NULL;
@@ -235,6 +262,14 @@ static void SubcodeLogSector(int lba, const uint8_t *sub)
 	else
 	{
 		sublog.sent++;
+
+		int raw_count = sublog_raw_count;
+		if (raw_count < SUBCODE_RAW_COUNT &&
+			(raw_count || (sub[0] & 0x3F) == 0x09 || (sub[24] & 0x3F) == 0x09 || (sub[48] & 0x3F) == 0x09 || (sub[72] & 0x3F) == 0x09))
+		{
+			memcpy(sublog_raw[raw_count], sub, 96);
+			__atomic_store_n(&sublog_raw_count, raw_count + 1, __ATOMIC_RELEASE);
+		}
 		if (!sublog.have_raw)
 		{
 			memcpy(sublog.raw, sub, 96);
