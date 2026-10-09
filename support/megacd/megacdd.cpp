@@ -26,6 +26,8 @@ static struct
 {
 	int first_lba, last_lba;
 	int sent, missing, q_ok;
+	int prev_lba, jumps, jump_from, jump_to;
+	int first_missing, first_bad_q;
 	int cdg_packs, empty_packs, other_packs;
 	int have_raw, have_q;
 	uint8_t raw[96];
@@ -51,6 +53,16 @@ static void SubcodeLogFlush()
 		sublog.first_lba, sublog.last_lba, sublog.sent, sublog.missing, sublog.q_ok,
 		sublog.cdg_packs, sublog.empty_packs, sublog.other_packs);
 
+	if (sublog.missing || sublog.q_ok < sublog.sent)
+	{
+		fprintf(sublog_f, "  first missing lba %d, first Q crc error lba %d\n", sublog.missing ? sublog.first_missing : -1, (sublog.q_ok < sublog.sent) ? sublog.first_bad_q : -1);
+	}
+
+	if (sublog.jumps)
+	{
+		fprintf(sublog_f, "  not in sequence: %d time(s), first %d -> %d\n", sublog.jumps, sublog.jump_from, sublog.jump_to);
+	}
+
 	if (sublog.have_q)
 	{
 		const uint8_t *q = sublog.q;
@@ -66,7 +78,10 @@ static void SubcodeLogFlush()
 	}
 
 	fflush(sublog_f);
+
+	int prev_lba = sublog.prev_lba;
 	memset(&sublog, 0, sizeof(sublog));
+	sublog.prev_lba = prev_lba;
 }
 
 static void SubcodeLogOpen(const char *source)
@@ -82,8 +97,10 @@ static void SubcodeLogOpen(const char *source)
 	}
 
 	memset(&sublog, 0, sizeof(sublog));
+	sublog.prev_lba = -1;
 	fprintf(sublog_f, "MegaCD subcode log, source: %s\n", source);
 	fprintf(sublog_f, "graphics = CD+G/CD+EG packs (mode/item 09 or 0A), empty = 00, Q crc ok = position data read correctly\n");
+	fprintf(sublog_f, "not in sequence = subcode lba not following the previous one (seek, or a sector skipped or repeated)\n");
 	fflush(sublog_f);
 	printf("\x1b[32mMCD: subcode log in %s\n\x1b[0m", SUBCODE_LOG_PATH);
 }
@@ -104,8 +121,20 @@ static void SubcodeLogSector(int lba, const uint8_t *sub)
 	if (!(sublog.sent + sublog.missing)) sublog.first_lba = lba;
 	sublog.last_lba = lba;
 
+	if (sublog.prev_lba >= 0 && lba != sublog.prev_lba + 1)
+	{
+		if (!sublog.jumps)
+		{
+			sublog.jump_from = sublog.prev_lba;
+			sublog.jump_to = lba;
+		}
+		sublog.jumps++;
+	}
+	sublog.prev_lba = lba;
+
 	if (!sub)
 	{
+		if (!sublog.missing) sublog.first_missing = lba;
 		sublog.missing++;
 	}
 	else
@@ -130,6 +159,11 @@ static void SubcodeLogSector(int lba, const uint8_t *sub)
 			sublog.q_ok++;
 			memcpy(sublog.q, q, 12);
 			sublog.have_q = 1;
+		}
+		else if (sublog.q_ok + 1 == sublog.sent)
+		{
+			// first Q error of this window: all sectors before it were good
+			sublog.first_bad_q = lba;
 		}
 
 		// Symbol 0 of a pack (mode/item) is not moved by the R-W interleave, so it can be read in place.
