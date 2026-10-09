@@ -172,7 +172,18 @@ static struct
 	int have_raw, have_q;
 	uint8_t raw[96];
 	uint8_t q[12];
+	int max_gap_us, late, burst;
 } sublog;
+
+// Time of the previous sector sent to the core, to see whether sectors arrive at a steady 75 per second
+static uint64_t sublog_prev_us = 0;
+
+static uint64_t SubcodeLogMicros()
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
 
 static void SubcodeLogFlush()
 {
@@ -186,6 +197,11 @@ static void SubcodeLogFlush()
 	{
 		SubcodeLogPrintf("  first missing lba %d, first Q crc error lba %d\n", sublog.missing ? sublog.first_missing : -1, (sublog.q_ok < sublog.sent) ? sublog.first_bad_q : -1);
 	}
+
+	// The core holds about 2 audio sectors (27 ms): a longer gap can empty it (audio click), and
+	// sectors sent back to back can reach the BIOS faster than it reads the subcode (lost graphics)
+	SubcodeLogPrintf("  timing: longest gap %d ms, gaps over 27 ms %d, sectors less than 5 ms apart %d\n",
+		sublog.max_gap_us / 1000, sublog.late, sublog.burst);
 
 	if (sublog.jumps)
 	{
@@ -237,8 +253,19 @@ static void SubcodeLogOpen(const char *source, int phys)
 	sublog_dropped = 0;
 	sublog_raw_count = 0;
 	sublog_raw_written = 0;
+	sublog_prev_us = 0;
 	__atomic_store_n(&sublog_stop, 0, __ATOMIC_RELEASE);
-	if (pthread_create(&sublog_thread, NULL, SubcodeLogThread, NULL))
+
+	// Run the SD card writes on core #0, since main runs on core #1 (same as offload.cpp)
+	pthread_attr_t attr;
+	pthread_attr_init(&attr);
+	cpu_set_t set;
+	CPU_ZERO(&set);
+	CPU_SET(0, &set);
+	pthread_attr_setaffinity_np(&attr, sizeof(set), &set);
+	int err = pthread_create(&sublog_thread, &attr, SubcodeLogThread, NULL);
+	pthread_attr_destroy(&attr);
+	if (err)
 	{
 		printf("\x1b[32mMCD: cannot start the subcode log thread\n\x1b[0m");
 		fclose(sublog_f);
@@ -267,6 +294,16 @@ static void SubcodeLogSector(int lba, const uint8_t *sub)
 
 	if (!(sublog.sent + sublog.missing)) sublog.first_lba = lba;
 	sublog.last_lba = lba;
+
+	uint64_t now = SubcodeLogMicros();
+	if (sublog_prev_us && lba == sublog.prev_lba + 1)
+	{
+		int gap = (int)(now - sublog_prev_us);
+		if (gap > sublog.max_gap_us) sublog.max_gap_us = gap;
+		if (gap > 27000) sublog.late++;
+		if (gap < 5000) sublog.burst++;
+	}
+	sublog_prev_us = now;
 
 	if (sublog.prev_lba >= 0 && lba != sublog.prev_lba + 1)
 	{

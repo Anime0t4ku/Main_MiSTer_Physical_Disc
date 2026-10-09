@@ -229,7 +229,7 @@ main=MiSTer_Physical-CD
 MEGACD_SUBCODE_LOG=1
 ```
 
-While a disc plays, `/media/fat/logs/megacd_subcode.log` gets one entry per second with the subcode sent to the core: sectors with and without subcode, how many Q position frames are valid, how many CD+G graphics packs were found, and one sector in hex. The file is rewritten each time a disc is mounted. Remove the line, or set `MEGACD_SUBCODE_LOG=0`, to turn it off.
+While a disc plays, `/media/fat/logs/megacd_subcode.log` gets one entry per second with the subcode sent to the core: sectors with and without subcode, how many Q position frames are valid, how many CD+G graphics packs were found, how evenly the sectors reached the core, and one sector in hex. The file is rewritten each time a disc is mounted. Remove the line, or set `MEGACD_SUBCODE_LOG=0`, to turn it off.
 
 With the log on, `/media/fat/logs/megacd_subcode_raw.bin` also gets the raw subcode (96 bytes per sector) from the first CD+G pack onwards, up to 5 minutes, saved every second, so the graphics data can be checked on a PC.
 
