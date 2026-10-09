@@ -1090,7 +1090,8 @@ int cdd_t::ReadSubcode(uint16_t* buf)
 		}
 		else
 		{
-			InterleaveSubcode(subc, buf);
+			//The drive returns raw P-W subchannel (READ CD sub-channel 001b), already in the layout the core expects, same as CHD RW_RAW
+			memcpy(buf, subc, 96);
 		}
 	}
 	else if (this->toc.chd_f)
