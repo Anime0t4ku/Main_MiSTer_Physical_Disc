@@ -4,12 +4,146 @@
 #include <string.h>
 #include <inttypes.h>
 #include <time.h>
+#include <sys/stat.h>
 
 #include "megacd.h"
+#include "../../cfg.h"
 #include "../chd/mister_chd.h"
 #include "../physical_disc/physical_disc.h"
 
 cdd_t cdd;
+
+// MEGACD_SUBCODE_LOG=1 in MiSTer.ini: once per second of playback, write a summary of the
+// subcode sent to the core, to check CD+G discs. The core gets raw P-W, one byte per symbol
+// (bit 7 = P, bit 6 = Q, bits 5..0 = R..W), 4 packs of 24 symbols per sector.
+#define SUBCODE_LOG_DIR    "/media/fat/logs"
+#define SUBCODE_LOG_PATH   SUBCODE_LOG_DIR "/megacd_subcode.log"
+#define SUBCODE_LOG_WINDOW 75
+
+static FILE *sublog_f = NULL;
+
+static struct
+{
+	int first_lba, last_lba;
+	int sent, missing, q_ok;
+	int cdg_packs, empty_packs, other_packs;
+	int have_raw, have_q;
+	uint8_t raw[96];
+	uint8_t q[12];
+} sublog;
+
+static uint16_t SubcodeLogCRC(const uint8_t *q)
+{
+	uint16_t crc = 0;
+	for (int i = 0; i < 10; i++)
+	{
+		crc ^= (uint16_t)q[i] << 8;
+		for (int b = 0; b < 8; b++) crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021) : (uint16_t)(crc << 1);
+	}
+	return (uint16_t)~crc;
+}
+
+static void SubcodeLogFlush()
+{
+	if (!sublog_f || !(sublog.sent + sublog.missing)) return;
+
+	fprintf(sublog_f, "lba %d-%d: sent %d, missing %d, Q crc ok %d, packs: graphics %d, empty %d, other %d\n",
+		sublog.first_lba, sublog.last_lba, sublog.sent, sublog.missing, sublog.q_ok,
+		sublog.cdg_packs, sublog.empty_packs, sublog.other_packs);
+
+	if (sublog.have_q)
+	{
+		const uint8_t *q = sublog.q;
+		fprintf(sublog_f, "  last Q: ctrl/adr %02X track %02X index %02X rel %02X:%02X:%02X abs %02X:%02X:%02X\n",
+			q[0], q[1], q[2], q[3], q[4], q[5], q[7], q[8], q[9]);
+	}
+
+	if (sublog.have_raw)
+	{
+		fprintf(sublog_f, "  raw lba %d:", sublog.first_lba);
+		for (int i = 0; i < 96; i++) fprintf(sublog_f, "%s%02X", (i % 24) ? "" : " ", sublog.raw[i]);
+		fprintf(sublog_f, "\n");
+	}
+
+	fflush(sublog_f);
+	memset(&sublog, 0, sizeof(sublog));
+}
+
+static void SubcodeLogOpen(const char *source)
+{
+	if (sublog_f || !cfg.megacd_subcode_log) return;
+
+	mkdir(SUBCODE_LOG_DIR, 0777);
+	sublog_f = fopen(SUBCODE_LOG_PATH, "w");
+	if (!sublog_f)
+	{
+		printf("\x1b[32mMCD: cannot write %s\n\x1b[0m", SUBCODE_LOG_PATH);
+		return;
+	}
+
+	memset(&sublog, 0, sizeof(sublog));
+	fprintf(sublog_f, "MegaCD subcode log, source: %s\n", source);
+	fprintf(sublog_f, "graphics = CD+G/CD+EG packs (mode/item 09 or 0A), empty = 00, Q crc ok = position data read correctly\n");
+	fflush(sublog_f);
+	printf("\x1b[32mMCD: subcode log in %s\n\x1b[0m", SUBCODE_LOG_PATH);
+}
+
+static void SubcodeLogClose()
+{
+	if (!sublog_f) return;
+
+	SubcodeLogFlush();
+	fclose(sublog_f);
+	sublog_f = NULL;
+}
+
+static void SubcodeLogSector(int lba, const uint8_t *sub)
+{
+	if (!sublog_f) return;
+
+	if (!(sublog.sent + sublog.missing)) sublog.first_lba = lba;
+	sublog.last_lba = lba;
+
+	if (!sub)
+	{
+		sublog.missing++;
+	}
+	else
+	{
+		sublog.sent++;
+		if (!sublog.have_raw)
+		{
+			memcpy(sublog.raw, sub, 96);
+			sublog.have_raw = 1;
+		}
+
+		uint8_t q[12];
+		for (int b = 0; b < 12; b++)
+		{
+			uint8_t v = 0;
+			for (int bit = 0; bit < 8; bit++) v = (uint8_t)((v << 1) | ((sub[b * 8 + bit] >> 6) & 1));
+			q[b] = v;
+		}
+
+		if (SubcodeLogCRC(q) == (((uint16_t)q[10] << 8) | q[11]))
+		{
+			sublog.q_ok++;
+			memcpy(sublog.q, q, 12);
+			sublog.have_q = 1;
+		}
+
+		// Symbol 0 of a pack (mode/item) is not moved by the R-W interleave, so it can be read in place.
+		for (int p = 0; p < 4; p++)
+		{
+			uint8_t mode_item = sub[p * 24] & 0x3F;
+			if (mode_item == 0x09 || mode_item == 0x0A) sublog.cdg_packs++;
+			else if (!mode_item) sublog.empty_packs++;
+			else sublog.other_packs++;
+		}
+	}
+
+	if (sublog.sent + sublog.missing >= SUBCODE_LOG_WINDOW) SubcodeLogFlush();
+}
 
 cdd_t::cdd_t() {
 	latency = 10;
@@ -320,6 +454,8 @@ int cdd_t::Load(const char *filename)
 
 		printf("\x1b[32mMCD: CD mounted , last track = %u\n\x1b[0m", this->toc.last);
 
+		SubcodeLogOpen(this->toc.phys ? "physical disc" : this->toc.chd_f ? "CHD" : this->toc.sub.opened() ? "CUE + .sub" : "CUE, no subcode");
+
 		return 1;
 	}
 
@@ -354,6 +490,8 @@ int cdd_t::SwapPhys()
 
 void cdd_t::Unload()
 {
+	SubcodeLogClose();
+
 	if (this->loaded)
 	{
 		if (this->toc.phys)
@@ -1144,6 +1282,7 @@ int cdd_t::SubcodeSend()
 	uint16_t buf[98 / 2];
 
 	int err = ReadSubcode(buf);
+	SubcodeLogSector(this->chd_audio_read_lba, err ? NULL : (const uint8_t*)buf);
 
 	if (!err && SendData)
 		return SendData((uint8_t*)buf, 98, MCD_SUB_IO_INDEX);

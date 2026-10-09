@@ -217,6 +217,20 @@ Physical Disc Support supports games that use CD audio, including mixed-mode dis
 
 Because the audio is being read from a real optical drive rather than a disc image, compatibility and timing can vary between drives and games.
 
+## CD+G Karaoke (Mega CD)
+
+CD+G karaoke discs show their graphics (lyrics and pictures) with the Mega CD core, through the CD player of the Mega CD BIOS, exactly as on the real console. Launch the Mega CD MGL from **`_Physical Disc Cores`**, or set `AUDIOCD=A0CD-MegaCD` so that Auto Disc Detection opens audio and CD+G discs with the Mega CD core. The USB drive must be able to read the raw subchannel.
+
+If the graphics do not appear, add `MEGACD_SUBCODE_LOG=1` to the Mega CD section of `MiSTer.ini`:
+
+```ini
+[A0CD-MegaCD]
+main=MiSTer_Physical-CD
+MEGACD_SUBCODE_LOG=1
+```
+
+While a disc plays, `/media/fat/logs/megacd_subcode.log` gets one entry per second with the subcode sent to the core: sectors with and without subcode, how many Q position frames are valid, how many CD+G graphics packs were found, and one sector in hex. The file is rewritten each time a disc is mounted. Remove the line, or set `MEGACD_SUBCODE_LOG=0`, to turn it off.
+
 ## Burning SNES MSU-1 & Mega Drive / Genesis MD+ CDs
 
 For users who want to create physical discs for **SNES MSU-1** or **Mega Drive / Genesis MD+**, a dedicated burning tutorial is included with the project.
