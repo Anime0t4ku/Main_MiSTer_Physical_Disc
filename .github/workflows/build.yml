@@ -22,3 +22,11 @@ jobs:
         with:
           name: MiSTer
           path: bin/MiSTer
+
+      - name: Build Video CD player
+        run: make vcd_player
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vcd_player
+          path: bin/vcd_player

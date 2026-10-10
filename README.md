@@ -199,6 +199,24 @@ Both DVD cores support physical DVDs independently. This setting is only used by
 
 An explicit selection is always respected. If the selected core is not installed, Auto Disc Detection shows a warning instead of launching the other core. Invalid `DVD=` values are also reported without launching a core.
 
+## Video CD
+
+Video CDs (VCD, SVCD and HQ-VCD, from any region: PAL, NTSC-U or NTSC-J) can be played through Auto Disc Detection.
+
+Video CDs contain MPEG-1 video, which none of the console cores can decode (the PlayStation core does not include the MPEG board of the Asian SCPH-5903 model). They are therefore played by a separate application running on the MiSTer Linux side, `vcd_player`, which decodes the video in software and shows it on the MiSTer video output.
+
+To enable it, copy `vcd_player` (built with `make vcd_player`, or taken from the build artifacts) to:
+
+```
+/media/fat/linux/vcd_player
+```
+
+Then, with Auto Disc Detection enabled, insert a Video CD while the MiSTer menu is showing. Playback starts automatically and plays every MPEG track of the disc in order. Press the OSD/Menu button to stop and return to the menu.
+
+When `/media/fat/linux/vcd_player` is not present, nothing changes: Video CDs are handled exactly as before.
+
+Audio is sent to the MiSTer audio output through `aplay`. If `aplay` is not available, video plays without sound.
+
 ## Disc Swapping
 
 Supported cores can detect physical disc removal and insertion while running.

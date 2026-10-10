@@ -23,6 +23,7 @@
 #include "physical_disc.h"
 #include "physical_disc_launch.h"
 #include "physical_disc_acoustic.h"
+#include "../vcd/vcd.h"
 
 #ifdef HAS_RCHEEVOS
 #include "../../achievements.h"
@@ -666,6 +667,18 @@ int physical_disc_launch_menu_tick(void)
 		physical_disc_close();
 		menu_detecting = 0;
 		return 0;
+	}
+
+	// Video CD: no core can decode MPEG-1, so the disc goes to the optional
+	// HPS player. Skipped entirely when the player is not installed.
+	if (vcd_player_installed() && vcd_disc_detect())
+	{
+		char device[64];
+		snprintf(device, sizeof(device), "%s", physical_disc_device());
+		menu_write_handled(fingerprint);
+		physical_disc_close();
+		menu_detecting = 0;
+		return vcd_launch_player(device);
 	}
 
 	physical_disc_disc_t type = physical_disc_identify();

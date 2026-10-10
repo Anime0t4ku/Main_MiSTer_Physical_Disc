@@ -110,3 +110,16 @@ $(BUILDDIR)/%.cpp.d: %.cpp
 
 # Ensure correct time stamp
 $(BUILDDIR)/main.cpp.o: $(filter-out $(BUILDDIR)/main.cpp.o, $(OBJ))
+
+# Video CD player: standalone HPS framebuffer application (tools/vcd_player).
+# Built separately with `make vcd_player`; the MiSTer binary does not depend on it.
+VCD_PLAYER = $(BUILDDIR)/vcd_player
+
+.PHONY: vcd_player
+vcd_player: $(VCD_PLAYER)
+
+$(VCD_PLAYER): tools/vcd_player/vcd_player.c tools/vcd_player/pl_mpeg.h
+	@mkdir -p $(BUILDDIR)
+	$(Q)$(info $@)
+	$(Q)$(CC) -O3 -Wall -std=gnu99 -static -o $@ $< -lm -lpthread
+	$(Q)$(STRIP) $@
