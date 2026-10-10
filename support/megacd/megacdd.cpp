@@ -4,12 +4,365 @@
 #include <string.h>
 #include <inttypes.h>
 #include <time.h>
+#include <sys/stat.h>
+#include <stdarg.h>
+#include <pthread.h>
+#include <unistd.h>
 
 #include "megacd.h"
+#include "../../cfg.h"
 #include "../chd/mister_chd.h"
 #include "../physical_disc/physical_disc.h"
 
 cdd_t cdd;
+
+// Physical disc: distance between the requested sector and the one whose subcode the drive returned
+#define PHYS_SUB_MAX_SHIFT 16
+static int phys_sub_shift = 0;
+
+// Subcode Q from raw P-W (bit 6 of each of the 96 bytes). Returns 1 when its CRC is valid.
+static int SubcodeQ(const uint8_t *sub, uint8_t *q)
+{
+	for (int b = 0; b < 12; b++)
+	{
+		uint8_t v = 0;
+		for (int bit = 0; bit < 8; bit++) v = (uint8_t)((v << 1) | ((sub[b * 8 + bit] >> 6) & 1));
+		q[b] = v;
+	}
+
+	uint16_t crc = 0;
+	for (int i = 0; i < 10; i++)
+	{
+		crc ^= (uint16_t)q[i] << 8;
+		for (int b = 0; b < 8; b++) crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021) : (uint16_t)(crc << 1);
+	}
+	return (uint16_t)~crc == (((uint16_t)q[10] << 8) | q[11]);
+}
+
+// LBA of the sector this subcode belongs to, from the absolute time in a valid mode 1 Q, or -1.
+static int SubcodeLBA(const uint8_t *sub)
+{
+	uint8_t q[12];
+	if (!SubcodeQ(sub, q) || (q[0] & 0x0F) != 1) return -1;
+
+	int m = (q[7] >> 4) * 10 + (q[7] & 0x0F);
+	int s = (q[8] >> 4) * 10 + (q[8] & 0x0F);
+	int f = (q[9] >> 4) * 10 + (q[9] & 0x0F);
+	return m * 60 * 75 + s * 75 + f - 150;
+}
+
+// MEGACD_SUBCODE_LOG=1 in MiSTer.ini: once per second of playback, write a summary of the
+// subcode sent to the core, to check CD+G discs. The core gets raw P-W, one byte per symbol
+// (bit 7 = P, bit 6 = Q, bits 5..0 = R..W), 4 packs of 24 symbols per sector.
+// The main loop only fills a memory buffer: a separate thread writes it to the SD card, so a
+// slow SD write never delays the sectors sent to the core.
+#define SUBCODE_LOG_DIR    "/media/fat/logs"
+#define SUBCODE_LOG_PATH   SUBCODE_LOG_DIR "/megacd_subcode.log"
+#define SUBCODE_LOG_WINDOW 75
+#define DRIVE_STATS_PATH   "/tmp/physical_disc_stats.log"
+#define SUBCODE_RAW_PATH   SUBCODE_LOG_DIR "/megacd_subcode_raw.bin"
+#define SUBCODE_RAW_COUNT  22500
+
+#define SUBCODE_LOG_BUFSIZE 32768
+
+static FILE *sublog_f = NULL;
+static int sublog_phys = 0;
+
+static pthread_t sublog_thread;
+static pthread_mutex_t sublog_lock = PTHREAD_MUTEX_INITIALIZER;
+static int sublog_stop = 0;
+static char sublog_buf[SUBCODE_LOG_BUFSIZE];
+static int sublog_len = 0;
+static int sublog_dropped = 0;
+
+// Raw copy of up to 22500 consecutive sectors (5 minutes) of subcode from the first CD+G pack, 96 bytes
+// each, to check the R-W data offline. Filled by the main loop, saved by the writer thread.
+static uint8_t sublog_raw[SUBCODE_RAW_COUNT][96];
+static int sublog_raw_count = 0;
+static int sublog_raw_written = 0;
+
+static void SubcodeLogPrintf(const char *fmt, ...)
+{
+	char line[512];
+	va_list args;
+	va_start(args, fmt);
+	int n = vsnprintf(line, sizeof(line), fmt, args);
+	va_end(args);
+	if (n <= 0) return;
+	if (n >= (int)sizeof(line)) n = sizeof(line) - 1;
+
+	pthread_mutex_lock(&sublog_lock);
+	if (sublog_len + n <= SUBCODE_LOG_BUFSIZE)
+	{
+		memcpy(sublog_buf + sublog_len, line, n);
+		sublog_len += n;
+	}
+	else
+	{
+		sublog_dropped += n;
+	}
+	pthread_mutex_unlock(&sublog_lock);
+}
+
+// Writes the buffered text to the SD card. Only called from the writer thread, or after it has stopped.
+static void SubcodeLogWrite()
+{
+	static char out[SUBCODE_LOG_BUFSIZE];
+
+	pthread_mutex_lock(&sublog_lock);
+	int len = sublog_len;
+	int dropped = sublog_dropped;
+	memcpy(out, sublog_buf, len);
+	sublog_len = 0;
+	sublog_dropped = 0;
+	pthread_mutex_unlock(&sublog_lock);
+
+	if (len) fwrite(out, 1, len, sublog_f);
+	if (dropped) fprintf(sublog_f, "(log buffer full, %d bytes lost)\n", dropped);
+	if (len || dropped) fflush(sublog_f);
+}
+
+// Appends the raw subcode sectors captured since the last call, so the file is there even if the
+// disc stops before the capture is complete. Only called from the writer thread, or after it has stopped.
+static void SubcodeLogWriteRaw()
+{
+	int count = __atomic_load_n(&sublog_raw_count, __ATOMIC_ACQUIRE);
+	if (count <= sublog_raw_written) return;
+
+	FILE *raw = fopen(SUBCODE_RAW_PATH, sublog_raw_written ? "ab" : "wb");
+	if (!raw) return;
+
+	fwrite(sublog_raw[sublog_raw_written], 96, count - sublog_raw_written, raw);
+	fclose(raw);
+	sublog_raw_written = count;
+	if (count == SUBCODE_RAW_COUNT) SubcodeLogPrintf("raw subcode of %d sectors written to %s\n", count, SUBCODE_RAW_PATH);
+}
+
+static void *SubcodeLogThread(void *)
+{
+	int ticks = 0;
+	while (!__atomic_load_n(&sublog_stop, __ATOMIC_ACQUIRE))
+	{
+		usleep(200 * 1000);
+		if (++ticks % 5) continue;
+
+		// Physical disc: every 5 seconds also copy the drive read statistics (cache misses,
+		// sectors read as zeros), which the drive thread rewrites every 5 seconds
+		FILE *stats = (sublog_phys && !(ticks % 25)) ? fopen(DRIVE_STATS_PATH, "r") : NULL;
+		if (stats)
+		{
+			char line[256];
+			while (fgets(line, sizeof(line), stats)) SubcodeLogPrintf("  drive: %s", line);
+			fclose(stats);
+		}
+
+		SubcodeLogWriteRaw();
+		SubcodeLogWrite();
+	}
+	return NULL;
+}
+
+static struct
+{
+	int first_lba, last_lba;
+	int sent, missing, q_ok;
+	int prev_lba, jumps, jump_from, jump_to;
+	int first_missing, first_bad_q;
+	int cdg_packs, empty_packs, other_packs;
+	int have_raw, have_q;
+	uint8_t raw[96];
+	uint8_t q[12];
+	int max_gap_us, late, burst;
+} sublog;
+
+// Time of the previous sector sent to the core, to see whether sectors arrive at a steady 75 per second
+static uint64_t sublog_prev_us = 0;
+
+static uint64_t SubcodeLogMicros()
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
+static void SubcodeLogFlush()
+{
+	if (!sublog_f || !(sublog.sent + sublog.missing)) return;
+
+	SubcodeLogPrintf("lba %d-%d: sent %d, missing %d, Q crc ok %d, packs: graphics %d, empty %d, other %d\n",
+		sublog.first_lba, sublog.last_lba, sublog.sent, sublog.missing, sublog.q_ok,
+		sublog.cdg_packs, sublog.empty_packs, sublog.other_packs);
+
+	if (sublog.missing || sublog.q_ok < sublog.sent)
+	{
+		SubcodeLogPrintf("  first missing lba %d, first Q crc error lba %d\n", sublog.missing ? sublog.first_missing : -1, (sublog.q_ok < sublog.sent) ? sublog.first_bad_q : -1);
+	}
+
+	// The core holds about 2 audio sectors (27 ms): a longer gap can empty it (audio click), and
+	// sectors sent back to back can reach the BIOS faster than it reads the subcode (lost graphics)
+	SubcodeLogPrintf("  timing: longest gap %d ms, gaps over 27 ms %d, sectors less than 5 ms apart %d\n",
+		sublog.max_gap_us / 1000, sublog.late, sublog.burst);
+
+	if (sublog.jumps)
+	{
+		SubcodeLogPrintf("  not in sequence: %d time(s), first %d -> %d\n", sublog.jumps, sublog.jump_from, sublog.jump_to);
+	}
+
+	if (sublog.have_q)
+	{
+		const uint8_t *q = sublog.q;
+		SubcodeLogPrintf("  last Q: ctrl/adr %02X track %02X index %02X rel %02X:%02X:%02X abs %02X:%02X:%02X\n",
+			q[0], q[1], q[2], q[3], q[4], q[5], q[7], q[8], q[9]);
+	}
+
+	if (sublog.have_raw)
+	{
+		char hex[96 * 2 + 4 + 1];
+		int pos = 0;
+		for (int i = 0; i < 96; i++) pos += sprintf(hex + pos, "%s%02X", (i % 24) ? "" : " ", sublog.raw[i]);
+		SubcodeLogPrintf("  raw lba %d:%s\n", sublog.first_lba, hex);
+	}
+
+	int prev_lba = sublog.prev_lba;
+	memset(&sublog, 0, sizeof(sublog));
+	sublog.prev_lba = prev_lba;
+}
+
+static void SubcodeLogOpen(const char *source, int phys)
+{
+	if (sublog_f || !cfg.megacd_subcode_log) return;
+
+	sublog_phys = phys;
+
+	mkdir(SUBCODE_LOG_DIR, 0777);
+	sublog_f = fopen(SUBCODE_LOG_PATH, "w");
+	if (!sublog_f)
+	{
+		printf("\x1b[32mMCD: cannot write %s\n\x1b[0m", SUBCODE_LOG_PATH);
+		return;
+	}
+
+	memset(&sublog, 0, sizeof(sublog));
+	sublog.prev_lba = -1;
+	fprintf(sublog_f, "MegaCD subcode log, source: %s\n", source);
+	fprintf(sublog_f, "graphics = CD+G/CD+EG packs (mode/item 09 or 0A), empty = 00, Q crc ok = position data read correctly\n");
+	fprintf(sublog_f, "not in sequence = subcode lba not following the previous one (seek, or a sector skipped or repeated)\n");
+	fflush(sublog_f);
+
+	sublog_len = 0;
+	sublog_dropped = 0;
+	sublog_raw_count = 0;
+	sublog_raw_written = 0;
+	sublog_prev_us = 0;
+	__atomic_store_n(&sublog_stop, 0, __ATOMIC_RELEASE);
+
+	// Run the SD card writes on core #0, since main runs on core #1 (same as offload.cpp)
+	pthread_attr_t attr;
+	pthread_attr_init(&attr);
+	cpu_set_t set;
+	CPU_ZERO(&set);
+	CPU_SET(0, &set);
+	pthread_attr_setaffinity_np(&attr, sizeof(set), &set);
+	int err = pthread_create(&sublog_thread, &attr, SubcodeLogThread, NULL);
+	pthread_attr_destroy(&attr);
+	if (err)
+	{
+		printf("\x1b[32mMCD: cannot start the subcode log thread\n\x1b[0m");
+		fclose(sublog_f);
+		sublog_f = NULL;
+		return;
+	}
+	printf("\x1b[32mMCD: subcode log in %s\n\x1b[0m", SUBCODE_LOG_PATH);
+}
+
+static void SubcodeLogClose()
+{
+	if (!sublog_f) return;
+
+	SubcodeLogFlush();
+	__atomic_store_n(&sublog_stop, 1, __ATOMIC_RELEASE);
+	pthread_join(sublog_thread, NULL);
+	SubcodeLogWriteRaw();
+	SubcodeLogWrite();
+	fclose(sublog_f);
+	sublog_f = NULL;
+}
+
+static void SubcodeLogSector(int lba, const uint8_t *sub)
+{
+	if (!sublog_f) return;
+
+	if (!(sublog.sent + sublog.missing)) sublog.first_lba = lba;
+	sublog.last_lba = lba;
+
+	uint64_t now = SubcodeLogMicros();
+	if (sublog_prev_us && lba == sublog.prev_lba + 1)
+	{
+		int gap = (int)(now - sublog_prev_us);
+		if (gap > sublog.max_gap_us) sublog.max_gap_us = gap;
+		if (gap > 27000) sublog.late++;
+		if (gap < 5000) sublog.burst++;
+	}
+	sublog_prev_us = now;
+
+	if (sublog.prev_lba >= 0 && lba != sublog.prev_lba + 1)
+	{
+		if (!sublog.jumps)
+		{
+			sublog.jump_from = sublog.prev_lba;
+			sublog.jump_to = lba;
+		}
+		sublog.jumps++;
+	}
+	sublog.prev_lba = lba;
+
+	if (!sub)
+	{
+		if (!sublog.missing) sublog.first_missing = lba;
+		sublog.missing++;
+	}
+	else
+	{
+		sublog.sent++;
+
+		int raw_count = sublog_raw_count;
+		if (raw_count < SUBCODE_RAW_COUNT &&
+			(raw_count || (sub[0] & 0x3F) == 0x09 || (sub[24] & 0x3F) == 0x09 || (sub[48] & 0x3F) == 0x09 || (sub[72] & 0x3F) == 0x09))
+		{
+			memcpy(sublog_raw[raw_count], sub, 96);
+			__atomic_store_n(&sublog_raw_count, raw_count + 1, __ATOMIC_RELEASE);
+		}
+		if (!sublog.have_raw)
+		{
+			memcpy(sublog.raw, sub, 96);
+			sublog.have_raw = 1;
+		}
+
+		uint8_t q[12];
+		if (SubcodeQ(sub, q))
+		{
+			sublog.q_ok++;
+			memcpy(sublog.q, q, 12);
+			sublog.have_q = 1;
+		}
+		else if (sublog.q_ok + 1 == sublog.sent)
+		{
+			// first Q error of this window: all sectors before it were good
+			sublog.first_bad_q = lba;
+		}
+
+		// Symbol 0 of a pack (mode/item) is not moved by the R-W interleave, so it can be read in place.
+		for (int p = 0; p < 4; p++)
+		{
+			uint8_t mode_item = sub[p * 24] & 0x3F;
+			if (mode_item == 0x09 || mode_item == 0x0A) sublog.cdg_packs++;
+			else if (!mode_item) sublog.empty_packs++;
+			else sublog.other_packs++;
+		}
+	}
+
+	if (sublog.sent + sublog.missing >= SUBCODE_LOG_WINDOW) SubcodeLogFlush();
+}
 
 cdd_t::cdd_t() {
 	latency = 10;
@@ -245,6 +598,7 @@ int cdd_t::Load(const char *filename)
 	fileTYPE *fd_img;
 
 	Unload();
+	phys_sub_shift = 0;
 
 	const char *ext = filename+strlen(filename)-4;
 	if (!strcmp(filename, PHYSICAL_DISC_SENTINEL))
@@ -320,6 +674,8 @@ int cdd_t::Load(const char *filename)
 
 		printf("\x1b[32mMCD: CD mounted , last track = %u\n\x1b[0m", this->toc.last);
 
+		SubcodeLogOpen(this->toc.phys ? "physical disc" : this->toc.chd_f ? "CHD" : this->toc.sub.opened() ? "CUE + .sub" : "CUE, no subcode", this->toc.phys);
+
 		return 1;
 	}
 
@@ -336,6 +692,7 @@ int cdd_t::SwapPhys()
 {
 	toc_t nt = {};
 	if (physical_disc_current_toc(&nt) || !nt.last) return 0;   
+	phys_sub_shift = 0;
 	this->toc = nt;                                       
 	this->sectorSize = this->toc.tracks[0].sector_size ? this->toc.tracks[0].sector_size : 2352;
 	this->toc.tracks[this->toc.last].start = this->toc.end;   
@@ -354,6 +711,8 @@ int cdd_t::SwapPhys()
 
 void cdd_t::Unload()
 {
+	SubcodeLogClose();
+
 	if (this->loaded)
 	{
 		if (this->toc.phys)
@@ -1081,17 +1440,34 @@ int cdd_t::ReadSubcode(uint16_t* buf)
 	{
 		uint8_t rawsec[2352];
 
-
-
-
-		if (!physical_disc_read_sector_sub(this->chd_audio_read_lba, rawsec, subc))
+		// The drive can return the subcode of a sector a few frames away, and the distance changes
+		// between reads: sent as is, some subcode would be repeated or skipped (broken CD+G graphics).
+		// The absolute time in Q tells which sector the subcode belongs to: read the one that matches.
+		int want = this->chd_audio_read_lba;
+		int at = want + phys_sub_shift;
+		err = -1;
+		for (int tries = 0; tries < 3; tries++)
 		{
-			err = -1;	
+			uint8_t cand[96];
+			if (!physical_disc_read_sector_sub(at, rawsec, cand)) break;   // keep the previous read, if any
+			memcpy(subc, cand, 96);
+			err = 0;
+
+			int sub_lba = SubcodeLBA(subc);
+			if (sub_lba < 0) break;              // no position in this Q: keep the current shift
+			if (sub_lba == want)
+			{
+				phys_sub_shift = at - want;
+				break;
+			}
+
+			int next = at + want - sub_lba;
+			if (next - want > PHYS_SUB_MAX_SHIFT || want - next > PHYS_SUB_MAX_SHIFT) break;
+			at = next;
 		}
-		else
-		{
-			InterleaveSubcode(subc, buf);
-		}
+
+		//The drive returns raw P-W subchannel (READ CD sub-channel 001b), already in the layout the core expects, same as CHD RW_RAW
+		if (!err) memcpy(buf, subc, 96);
 	}
 	else if (this->toc.chd_f)
 	{
@@ -1143,6 +1519,7 @@ int cdd_t::SubcodeSend()
 	uint16_t buf[98 / 2];
 
 	int err = ReadSubcode(buf);
+	SubcodeLogSector(this->chd_audio_read_lba, err ? NULL : (const uint8_t*)buf);
 
 	if (!err && SendData)
 		return SendData((uint8_t*)buf, 98, MCD_SUB_IO_INDEX);
