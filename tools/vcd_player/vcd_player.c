@@ -32,6 +32,7 @@
 #include <scsi/sg.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <ucontext.h>
 
 #define PL_MPEG_IMPLEMENTATION
 #include "pl_mpeg.h"
@@ -48,10 +49,19 @@ static volatile sig_atomic_t quit_requested = 0;
 static const char *volatile stage = "start";
 #define STAGE(name) do { stage = (name); fprintf(stderr, "vcd_player: %s\n", stage); } while (0)
 
-static void on_crash(int sig)
+static void on_crash(int sig, siginfo_t *info, void *ctx)
 {
-	char msg[160];
-	int n = snprintf(msg, sizeof(msg), "vcd_player: crashed (signal %d) during: %s\n", sig, stage);
+	char msg[200];
+	unsigned long pc = 0, lr = 0;
+#if defined(__arm__)
+	ucontext_t *uc = (ucontext_t *)ctx;
+	pc = uc->uc_mcontext.arm_pc;
+	lr = uc->uc_mcontext.arm_lr;
+#else
+	(void)ctx;
+#endif
+	int n = snprintf(msg, sizeof(msg), "vcd_player: crashed (signal %d) during: %s pc=%08lx lr=%08lx addr=%p\n",
+		sig, stage, pc, lr, info ? info->si_addr : NULL);
 	if (n > 0 && write(2, msg, n) < 0) n = 0;
 	_exit(128 + sig);
 }
@@ -566,10 +576,14 @@ int main(int argc, char *argv[])
 	signal(SIGTERM, on_signal);
 	signal(SIGHUP, on_signal);
 	signal(SIGPIPE, SIG_IGN);
-	signal(SIGSEGV, on_crash);
-	signal(SIGBUS, on_crash);
-	signal(SIGILL, on_crash);
-	signal(SIGFPE, on_crash);
+	struct sigaction sa;
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_sigaction = on_crash;
+	sa.sa_flags = SA_SIGINFO;
+	sigaction(SIGSEGV, &sa, NULL);
+	sigaction(SIGBUS, &sa, NULL);
+	sigaction(SIGILL, &sa, NULL);
+	sigaction(SIGFPE, &sa, NULL);
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	STAGE("open drive");
 

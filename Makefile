@@ -121,5 +121,6 @@ vcd_player: $(VCD_PLAYER)
 $(VCD_PLAYER): tools/vcd_player/vcd_player.c tools/vcd_player/pl_mpeg.h
 	@mkdir -p $(BUILDDIR)
 	$(Q)$(info $@)
-	$(Q)$(CC) -O3 -Wall -std=gnu99 -static -o $@ $< -lm -lpthread
+	$(Q)$(CC) -O3 -g -Wall -std=gnu99 -static -o $@ $< -lm -lpthread
+	$(Q)cp $@ $@.elf
 	$(Q)$(STRIP) $@
