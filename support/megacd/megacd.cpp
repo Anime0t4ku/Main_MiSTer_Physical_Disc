@@ -46,13 +46,20 @@ void mcd_poll()
 		cdd.latency = 10;
 	}
 
-	if (!poll_timer || CheckTimer(poll_timer))
+	int paced = !cdd.isData && cdd.status == CD_STAT_PLAY && cdd.latency == 0 && cfg.megacd_cdda_paced;
+	if (paced && poll_timer && CheckTimer(poll_timer) && !mcd_can_send_data(0))   // 0: audio track (isData is 0)
 	{
-		if (!cdd.isData && cdd.status == CD_STAT_PLAY && cdd.latency == 0 && cfg.megacd_cdda_paced) {
-			// MEGACD_CDDA_PACED=1: one audio sector (and its subcode) every 13.25 ms (13,13,13,14), close to
-			// the 75 sectors per second of a real drive, so the subcode reaches the BIOS at a steady rate (CD+G).
-			// The next poll is set from the previous one, so a late poll is caught up; slightly faster than
-			// 75 Hz so the audio buffer stays filled.
+		// MEGACD_CDDA_PACED=1: the audio buffer is full. Hold back the status too, and try again in 1 ms,
+		// so that every status (CDD interrupt) comes with exactly one sector of subcode, as on a real drive.
+		poll_timer = GetTimer(1);
+	}
+	else if (!poll_timer || CheckTimer(poll_timer))
+	{
+		if (paced) {
+			// MEGACD_CDDA_PACED=1: one audio sector (and its subcode) with each status, every 13.25 ms
+			// (13,13,13,14), close to the 75 sectors per second of a real drive, so the subcode reaches the
+			// BIOS at a steady rate (CD+G). The next poll is set from the previous one, so a late poll is
+			// caught up; slightly faster than 75 Hz so the audio buffer stays filled.
 			static uint8_t paced_adj = 0;
 			uint32_t next = poll_timer + 13 + (paced_adj == 3 ? 1 : 0);
 			if (++paced_adj >= 4) paced_adj = 0;
