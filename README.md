@@ -224,9 +224,27 @@ Pressing any button of the gamepad shows the controls and a progress bar at the 
 | B | Stop (back to the beginning of the disc; Start plays again) |
 | D-pad right / left | Next / previous chapter |
 | R / L | Fast forward / rewind at 10x (press again, or Start, to play) |
+| D-pad up / down | Audio channel: stereo, left only, right only (for discs with two languages on the two channels) |
+| Y | Back to the disc menu (Video CD 2.0 discs with menus) |
 | X, then A | Exit to the menu (any other button cancels) |
 
-Chapters are the entry points stored on the disc (`ENTRIES.VCD`), or the MPEG tracks when the disc has none. Video CD menus (PBC) are not supported.
+Chapters are the entry points stored on the disc (`ENTRIES.VCD`), or the MPEG tracks when the disc has none.
+
+### Video CD 2.0 menus (PBC)
+
+Video CD 2.0 discs with playback control (`PSD.VCD`) start from the disc's own menu, which is drawn by the disc as a picture with numbered choices. The controls stay on screen while a menu is shown:
+
+| Button | Action |
+| --- | --- |
+| D-pad up / down | Choose the menu entry (the number is shown at the bottom) |
+| A | Play the chosen entry |
+| Start | Play the menu's default entry |
+| D-pad right / left | Next / previous page of the menu |
+| Y | Back (the disc's "return") |
+| B | Stop |
+| X, then A | Exit to the menu |
+
+Menu timeouts, waits and loops are followed as stored on the disc. Discs without menus, or with menus the player cannot read, play their tracks in order as before. Subtitles on Video CDs are part of the picture and are always shown; Super Video CDs (MPEG-2) are not decoded.
 
 When `/media/fat/linux/vcd_player` is not present, nothing changes: Video CDs are handled exactly as before.
 

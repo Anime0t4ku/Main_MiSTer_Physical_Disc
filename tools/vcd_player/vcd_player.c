@@ -239,7 +239,8 @@ static const char *detect_vcd_kind(void)
 // and resynchronise audio after a jump.
 typedef struct
 {
-	int track;
+	int start;   // first sector of the stream (a track or a menu segment)
+	int end;     // exclusive
 	size_t pos;  // stream offset of the next byte to load
 	size_t size; // stream size of the whole track
 	uint8_t raw[READ_BATCH * RAW_SECTOR];
@@ -257,7 +258,6 @@ static void sector_block(const uint8_t *raw, uint8_t *block)
 static void feed_load(plm_buffer_t *buf, void *user)
 {
 	feed_t *f = (feed_t *)user;
-	const track_t *t = &tracks[f->track];
 
 	if (buf->discard_read_bytes) plm_buffer_discard_read_bytes(buf);
 
@@ -270,7 +270,7 @@ static void feed_load(plm_buffer_t *buf, void *user)
 	if (!room) return;
 
 	int first = (int)(f->pos / FORM2_DATA);
-	int count = (t->end - t->start) - first;
+	int count = (f->end - f->start) - first;
 	if (count > READ_BATCH) count = READ_BATCH;
 	int need = (int)((room + f->pos % FORM2_DATA + FORM2_DATA - 1) / FORM2_DATA);
 	if (count > need) count = need;
@@ -280,7 +280,7 @@ static void feed_load(plm_buffer_t *buf, void *user)
 		return;
 	}
 
-	read_raw(t->start + first, count, f->raw);
+	read_raw(f->start + first, count, f->raw);
 	for (int i = 0; i < count && room; i++)
 	{
 		sector_block(f->raw + i * RAW_SECTOR, f->block);
@@ -603,20 +603,35 @@ static int legend_item(int x, int y, const char *button, const char *label, int 
 	return bw + 3 * ui + text_width(label);
 }
 
-static const char *const legend[][2] =
+typedef const char *const legend_t[2];
+
+// Playback; the "Y Menu" item is only shown when the disc has menus.
+static legend_t legend_play[] =
 {
 	{ "START", "Play" },
 	{ "SELECT", "Pausa" },
 	{ "B", "Stop" },
 	{ "\x10 \x11", "Capitolo" },
-	{ "L", "\x10\x10 10x" },
-	{ "R", "\x11\x11 10x" },
+	{ "L", "\x10\x10" },
+	{ "R", "\x11\x11" },
+	{ "\x12 \x13", "Audio" },
+	{ "X", "Esci" },
+	{ "Y", "Menu" },
+};
+
+// Video CD 2.0 menu (selection list).
+static legend_t legend_menu[] =
+{
+	{ "\x12 \x13", "Scelta" },
+	{ "A", "Conferma" },
+	{ "\x10 \x11", "Pagina" },
+	{ "Y", "Indietro" },
+	{ "B", "Stop" },
 	{ "X", "Esci" },
 };
 
-static void legend_row(int y)
+static void legend_row(int y, legend_t *legend, int n)
 {
-	int n = sizeof(legend) / sizeof(legend[0]);
 	int total = 0;
 	for (int i = 0; i < n; i++) total += legend_item(0, 0, legend[i][0], legend[i][1], 0);
 	int avail = fb_w - 2 * 12 * ui;
@@ -643,6 +658,10 @@ typedef struct
 	double duration;
 	int chapter;  // 1-based, 0 when unknown
 	int chapters;
+	int audio_mode; // 0 stereo, 1 left channel, 2 right channel
+	int has_menu;   // disc menus: show "Y Menu"
+	int menu;       // a menu is on screen
+	int sel, sel_min, sel_max;
 } osd_info_t;
 
 static void osd_layout(void)
@@ -679,16 +698,31 @@ static void osd_build(const osd_info_t *info)
 	// pictures while leaving the image visible.
 	for (int y = 0; y < ovl_h; y++) memset(ovl_a + (size_t)y * fb_w, 100 * y / ovl_h, fb_w);
 
-	// Status line: state icon and name, chapter, time.
+	int x;
+	if (info->menu && !info->confirm_exit)
+	{
+		// Menu: the current choice, changed with up/down and taken with A.
+		x = ovl_text(mx, status_y, "MENU");
+		snprintf(buf, sizeof(buf), "Scelta: %d", info->sel);
+		x = ovl_text(x + 16 * ui, status_y, buf);
+		snprintf(buf, sizeof(buf), "(%d-%d)", info->sel_min, info->sel_max);
+		ovl_text(x + 8 * ui, status_y, buf);
+		legend_row(legend_y, legend_menu, sizeof(legend_menu) / sizeof(legend_menu[0]));
+		return;
+	}
+
+	// Status line: state icon and name, chapter, audio, time.
 	static const char *const names[] = { "PLAY", "PAUSA", "STOP", "AVANTI 10x", "INDIETRO 10x" };
+	static const char *const audio[] = { "Audio Stereo", "Audio Sinistro", "Audio Destro" };
 	int ih = 8 * ui;
 	icon_with_shadow(mx, status_y, ih, info->state);
-	int x = ovl_text(mx + icon_width(info->state, ih) + 4 * ui, status_y, names[info->state]);
+	x = ovl_text(mx + icon_width(info->state, ih) + 4 * ui, status_y, names[info->state]);
 	if (info->chapters > 0 && info->chapter > 0)
 	{
 		snprintf(buf, sizeof(buf), "Capitolo %d/%d", info->chapter, info->chapters);
-		ovl_text(x + 16 * ui, status_y, buf);
+		x = ovl_text(x + 16 * ui, status_y, buf);
 	}
+	if (info->state != ST_STOP) ovl_text(x + 16 * ui, status_y, audio[info->audio_mode % 3]);
 	format_time(info->time, t1, sizeof(t1));
 	format_time(info->duration, t2, sizeof(t2));
 	snprintf(buf, sizeof(buf), "%s / %s", t1, t2);
@@ -718,7 +752,8 @@ static void osd_build(const osd_info_t *info)
 	}
 	else
 	{
-		legend_row(legend_y);
+		int n = sizeof(legend_play) / sizeof(legend_play[0]);
+		legend_row(legend_y, legend_play, info->has_menu ? n : n - 1);
 	}
 }
 
@@ -889,6 +924,11 @@ typedef struct
 static entry_t entries[MAX_ENTRIES];
 static int num_entries = 0;
 
+// Every ENTRIES.VCD entry as stored (track 0 when unusable), indexed like the
+// entry play items of the Video CD 2.0 menus.
+static entry_t entry_items[MAX_ENTRIES];
+static int num_entry_items = 0;
+
 static int from_bcd(uint8_t v)
 {
 	return (v >> 4) * 10 + (v & 0x0F);
@@ -909,8 +949,12 @@ static void read_entries(void)
 			const uint8_t *e = p + 12 + 4 * i;
 			int track = from_bcd(e[0]);
 			int lba = (from_bcd(e[1]) * 60 + from_bcd(e[2])) * 75 + from_bcd(e[3]) - 150;
-			if (track < 2 || track > track_last || !tracks[track].data) continue;
-			if (lba < tracks[track].start || lba >= tracks[track].end) continue;
+			if (track < 2 || track > track_last || !tracks[track].data) track = 0;
+			else if (lba < tracks[track].start || lba >= tracks[track].end) track = 0;
+			entry_items[num_entry_items].track = track;
+			entry_items[num_entry_items].lba = lba;
+			num_entry_items++;
+			if (!track) continue;
 			if (num_entries && lba <= entries[num_entries - 1].lba) continue;
 			entries[num_entries].track = track;
 			entries[num_entries].lba = lba;
@@ -938,7 +982,8 @@ static void read_entries(void)
 static plm_frame_t *pending_frame = NULL;
 static plm_t *plm = NULL;
 static feed_t feed;
-static int cur_track = 0;
+static int cur_track = 0; // 0 while a menu segment plays
+static int cur_start = 0, cur_end = 0;
 static double cur_duration = 0;
 static int cur_lead = 0; // empty sectors before the first MPEG pack of the track
 
@@ -951,6 +996,11 @@ static void on_video(plm_t *self, plm_frame_t *frame, void *user)
 	pending_frame = frame;
 }
 
+// Video CDs have a single stereo audio stream. Discs with two languages (or
+// karaoke discs with and without the voice) put one on each channel, so the
+// language is chosen by playing only the left or only the right channel.
+static int audio_mode = 0; // 0 stereo, 1 left, 2 right
+
 static void on_audio(plm_t *self, plm_samples_t *samples, void *user)
 {
 	(void)self;
@@ -962,8 +1012,12 @@ static void on_audio(plm_t *self, plm_samples_t *samples, void *user)
 	{
 		if (audio_wr - audio_rd >= AUDIO_RING) audio_rd++; // overrun: drop oldest
 		unsigned j = audio_wr % AUDIO_RING;
-		audio_ring[j * 2] = to_s16(samples->interleaved[i * 2]);
-		audio_ring[j * 2 + 1] = to_s16(samples->interleaved[i * 2 + 1]);
+		int16_t l = to_s16(samples->interleaved[i * 2]);
+		int16_t r = to_s16(samples->interleaved[i * 2 + 1]);
+		if (audio_mode == 1) r = l;
+		else if (audio_mode == 2) l = r;
+		audio_ring[j * 2] = l;
+		audio_ring[j * 2 + 1] = r;
 		audio_wr++;
 	}
 	pthread_cond_signal(&audio_cond);
@@ -982,18 +1036,22 @@ static void close_track(void)
 	if (plm) plm_destroy(plm);
 	plm = NULL;
 	cur_track = 0;
+	cur_start = cur_end = 0;
 	cur_duration = 0;
 }
 
-static int track_lead(int track);
+static int track_lead(int start, int end);
 
-static int open_track(int track)
+// Opens the MPEG stream in sectors start..end-1: a track, or (track 0) a
+// segment of the Video CD 2.0 menus.
+static int open_stream(int start, int end, int track)
 {
 	close_track();
-	memset(&feed, 0, sizeof(feed) - sizeof(feed.raw) - sizeof(feed.block));
-	feed.track = track;
+	if (end <= start) return -1;
+	feed.start = start;
+	feed.end = end;
 	feed.pos = 0;
-	feed.size = (size_t)(tracks[track].end - tracks[track].start) * FORM2_DATA;
+	feed.size = (size_t)(end - start) * FORM2_DATA;
 
 	plm_buffer_t *buf = plm_buffer_create_with_callbacks(feed_load, feed_seek, feed_tell, feed.size, &feed);
 	if (!buf) return -1;
@@ -1005,7 +1063,7 @@ static int open_track(int track)
 	STAGE("read MPEG headers");
 	if (!plm_has_headers(plm))
 	{
-		fprintf(stderr, "vcd_player: track %d has no MPEG-1 stream\n", track);
+		fprintf(stderr, "vcd_player: %s %d has no MPEG-1 stream\n", track ? "track" : "segment at", track ? track : start);
 		close_track();
 		return -1;
 	}
@@ -1035,34 +1093,40 @@ static int open_track(int track)
 	}
 
 	cur_track = track;
-	cur_lead = track_lead(track);
+	cur_start = start;
+	cur_end = end;
+	cur_lead = track_lead(start, end);
 	STAGE("read duration");
 	cur_duration = plm_get_duration(plm);
-	if (!(cur_duration > 0))
+	if (!(cur_duration >= 0))
 	{
 		// Video CD streams are constant bit rate: 75 sectors per second.
-		cur_duration = (tracks[track].end - tracks[track].start) / 75.0;
+		cur_duration = (end - start) / 75.0;
 	}
 
-	printf("vcd_player: track %d, %dx%d @ %.3f fps, audio %d Hz, %.0f s\n", track,
+	printf("vcd_player: %s %d, %dx%d @ %.3f fps, audio %d Hz, %.0f s\n", track ? "track" : "segment at", track ? track : start,
 		plm_get_width(plm), plm_get_height(plm), plm_get_framerate(plm), plm_get_samplerate(plm), cur_duration);
 	return 0;
 }
 
-// Video CD tracks start with a few empty sectors before the first MPEG pack.
-static int track_lead(int track)
+static int open_track(int track)
 {
-	const track_t *t = &tracks[track];
-	for (int lba = t->start; lba < t->end && lba < t->start + 300; lba += READ_BATCH)
+	return open_stream(tracks[track].start, tracks[track].end, track);
+}
+
+// Video CD tracks start with a few empty sectors before the first MPEG pack.
+static int track_lead(int start, int end)
+{
+	for (int lba = start; lba < end && lba < start + 300; lba += READ_BATCH)
 	{
-		int count = t->end - lba;
+		int count = end - lba;
 		if (count > READ_BATCH) count = READ_BATCH;
 		read_raw(lba, count, feed.raw);
 		for (int i = 0; i < count; i++)
 		{
 			int len = 0;
 			const uint8_t *p = sector_payload(feed.raw + i * RAW_SECTOR, &len);
-			if (len >= 4 && !p[0] && !p[1] && p[2] == 1 && p[3] == 0xBA) return lba + i - t->start;
+			if (len >= 4 && !p[0] && !p[1] && p[2] == 1 && p[3] == 0xBA) return lba + i - start;
 		}
 	}
 	return 0;
@@ -1082,12 +1146,12 @@ static int next_data_track(int track, int dir)
 static int time_to_lba(double t)
 {
 	if (t < 0) t = 0;
-	return tracks[cur_track].start + cur_lead + (int)(t * 75.0);
+	return cur_start + cur_lead + (int)(t * 75.0);
 }
 
 static double lba_to_time(int lba)
 {
-	return (lba - tracks[cur_track].start - cur_lead) / 75.0;
+	return (lba - cur_start - cur_lead) / 75.0;
 }
 
 // Index of the chapter that contains lba, -1 before the first one.
@@ -1137,8 +1201,16 @@ static int first_track(void)
 	return num_entries ? entries[0].track : next_data_track(1, 1);
 }
 
+static void pbc_start(player_t *p);
+static int pbc_ok;
+
 static void do_play(player_t *p)
 {
+	if (p->state == ST_STOP && pbc_ok)
+	{
+		pbc_start(p);
+		return;
+	}
 	if (p->state == ST_STOP)
 	{
 		if (open_track(first_track())) return;
@@ -1151,8 +1223,11 @@ static void do_play(player_t *p)
 	p->state = ST_PLAY;
 }
 
+static void pbc_stop(void);
+
 static void do_stop(player_t *p)
 {
+	pbc_stop();
 	close_track();
 	audio_flush();
 	have_frame = 0;
@@ -1163,7 +1238,7 @@ static void do_stop(player_t *p)
 
 static void do_chapter(player_t *p, int dir)
 {
-	if (p->state == ST_STOP || !plm) return;
+	if (p->state == ST_STOP || !plm || !cur_track) return;
 	int now = time_to_lba(play_time(p)) + 38;
 	int c = chapter_at(now);
 	int target;
@@ -1185,7 +1260,7 @@ static void do_chapter(player_t *p, int dir)
 
 static void do_scan(player_t *p, int state)
 {
-	if (p->state == ST_STOP || !plm) return;
+	if (p->state == ST_STOP || !plm || !cur_track) return;
 	if (p->state == state)
 	{
 		do_play(p);
@@ -1195,6 +1270,320 @@ static void do_scan(player_t *p, int state)
 	audio_flush();
 	p->state = state;
 	p->ff_step = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Video CD 2.0 menus (playback control, PBC)
+// ---------------------------------------------------------------------------
+
+// INFO.VCD gives the size of PSD.VCD, the menu segments and the PSD offset
+// unit; LOT.VCD (LBA 152) gives the descriptor of the first list (LID 1);
+// PSD.VCD (LBA 184) holds the lists. Lists point to each other by offset:
+//   play list (0x10): items played in order, then wait and go to "next"
+//   selection list (0x18/0x1A): a menu picture and numbered choices
+//   end list (0x1F): end of playback
+// Play items: 2..99 = track, 100..599 = entry point, 1000..2979 = segment.
+#define LOT_LBA 152
+#define PSD_LBA 184
+#define SEGMENT_SECTORS 150
+#define MAX_SEGMENTS 1980
+#define PSD_OFS_DISABLED 0xFFFF
+#define PSD_OFS_MULTI_DEF 0xFFFE
+#define PSD_OFS_MULTI_DEF_NO_NUM 0xFFFD
+
+static int pbc_ok = 0;
+static uint8_t *psd = NULL;
+static int psd_size = 0, psd_mult = 8;
+static int pbc_first = PSD_OFS_DISABLED;
+static int seg_first = 0, seg_count = 0;
+static uint8_t seg_info[MAX_SEGMENTS];
+
+static int be16(const uint8_t *p)
+{
+	return (p[0] << 8) | p[1];
+}
+
+static void read_pbc(void)
+{
+	uint8_t raw[RAW_SECTOR];
+	int len = 0;
+	read_raw(VCD_INFO_LBA, 1, raw);
+	const uint8_t *p = sector_payload(raw, &len);
+	if (len < 2048 || memcmp(p, "VIDEO_CD", 8) || p[8] < 2) return; // VCD 2.0 only
+
+	int size = (p[44] << 24) | (p[45] << 16) | (p[46] << 8) | p[47];
+	if (size <= 0 || size > 256 * 1024) return;
+	seg_first = (from_bcd(p[48]) * 60 + from_bcd(p[49])) * 75 + from_bcd(p[50]) - 150;
+	psd_mult = p[51] ? p[51] : 8;
+	seg_count = be16(p + 54);
+	if (seg_count > MAX_SEGMENTS) seg_count = MAX_SEGMENTS;
+	memcpy(seg_info, p + 56, seg_count);
+
+	read_raw(LOT_LBA, 1, raw);
+	p = sector_payload(raw, &len);
+	if (len < 2048) return;
+	for (int i = 0; i < 1023 && pbc_first == PSD_OFS_DISABLED; i++)
+	{
+		int ofs = be16(p + 2 + 2 * i);
+		if (ofs != PSD_OFS_DISABLED) pbc_first = ofs;
+	}
+	if (pbc_first == PSD_OFS_DISABLED) return;
+
+	int sectors = (size + 2047) / 2048;
+	psd = (uint8_t *)calloc((size_t)sectors * 2048, 1);
+	if (!psd) return;
+	for (int i = 0; i < sectors; i++)
+	{
+		read_raw(PSD_LBA + i, 1, raw);
+		p = sector_payload(raw, &len);
+		if (len >= 2048) memcpy(psd + i * 2048, p, 2048);
+	}
+	psd_size = size;
+	pbc_ok = 1;
+	printf("vcd_player: Video CD 2.0 menus, PSD %d bytes, %d segment(s)\n", psd_size, seg_count);
+}
+
+static const uint8_t *psd_list(int ofs)
+{
+	if (ofs < 0 || ofs >= PSD_OFS_MULTI_DEF_NO_NUM) return NULL;
+	long pos = (long)ofs * psd_mult;
+	if (pos + 20 > psd_size) return NULL;
+	return psd + pos;
+}
+
+// Wait and timeout times: seconds, 60 + 10 s steps above 60, 255 = forever.
+static double pbc_wait_seconds(int v)
+{
+	if (v == 255) return -1;
+	if (v <= 60) return v;
+	return 60 + (v - 60) * 10.0;
+}
+
+typedef struct
+{
+	int active;
+	int ofs;               // current list
+	const uint8_t *list;
+	int item;              // play list: index of the item playing
+	int sel;               // selection list: current choice
+	int loops;             // selection list: plays of its item still to do
+	int holding;           // item finished, picture kept on screen
+	double wait_until;     // > 0: when the wait ends
+	int jumps;             // lists entered without playing anything
+} pbc_t;
+
+static pbc_t pbc;
+
+static int pbc_is_menu(void)
+{
+	return pbc.active && pbc.list && (pbc.list[0] == 0x18 || pbc.list[0] == 0x1A);
+}
+
+static int pbc_play_item(int item)
+{
+	if (item >= 2 && item <= 99)
+	{
+		if (item > track_last || !tracks[item].data) return -1;
+		return open_track(item);
+	}
+	if (item >= 100 && item < 600)
+	{
+		int e = item - 100;
+		if (e >= num_entry_items || !entry_items[e].track) return -1;
+		if (open_track(entry_items[e].track)) return -1;
+		double t = lba_to_time(entry_items[e].lba);
+		if (t >= 0.5) seek_to(t, TRUE);
+		return 0;
+	}
+	if (item >= 1000 && item < 1000 + seg_count)
+	{
+		// A play item can span several segments: the following ones are
+		// marked as continuations.
+		int s = item - 1000, n = 1;
+		while (s + n < seg_count && (seg_info[s + n] & 0x20)) n++;
+		return open_stream(seg_first + s * SEGMENT_SECTORS, seg_first + (s + n) * SEGMENT_SECTORS, 0);
+	}
+	close_track(); // nothing to play: keep the last picture
+	return -1;
+}
+
+static void pbc_hold(double wait)
+{
+	pbc.holding = 1;
+	pbc.wait_until = wait >= 0 ? now_seconds() + wait : 0;
+}
+
+static void pbc_end(player_t *p);
+static void pbc_item_done(player_t *p);
+
+static void pbc_goto(player_t *p, int ofs)
+{
+	const uint8_t *d = psd_list(ofs);
+	if (!d)
+	{
+		pbc_end(p);
+		return;
+	}
+	if (++pbc.jumps > 64)
+	{
+		fprintf(stderr, "vcd_player: menus loop without playing anything\n");
+		pbc_end(p);
+		return;
+	}
+
+	pbc.ofs = ofs;
+	pbc.list = d;
+	pbc.holding = 0;
+	pbc.wait_until = 0;
+	p->state = ST_PLAY;
+	p->dirty = 1;
+	audio_flush();
+
+	switch (d[0])
+	{
+	case 0x10:
+		pbc.item = 0;
+		fprintf(stderr, "vcd_player: play list (lid %d), %d item(s)\n", be16(d + 2) & 0x7FFF, d[1]);
+		if (!d[1] || pbc_play_item(be16(d + 14))) pbc_item_done(p);
+		break;
+
+	case 0x18:
+	case 0x1A:
+		pbc.sel = d[3];
+		pbc.loops = d[17] & 0x7F;
+		fprintf(stderr, "vcd_player: menu (lid %d), choices %d-%d\n", be16(d + 4) & 0x7FFF, d[3], d[3] + d[2] - 1);
+		if (pbc_play_item(be16(d + 18))) pbc_item_done(p);
+		break;
+
+	default:
+		pbc_end(p);
+		break;
+	}
+}
+
+// The item that was playing has finished (or could not be played).
+static void pbc_item_done(player_t *p)
+{
+	(void)p;
+	const uint8_t *d = pbc.list;
+	if (!d) return;
+
+	if (d[0] == 0x10)
+	{
+		while (++pbc.item < d[1])
+		{
+			if (pbc.item * 2 + 14 + 2 > psd_size - (d - psd)) break;
+			if (!pbc_play_item(be16(d + 14 + pbc.item * 2))) return;
+		}
+		// List played: keep the last picture for the wait time, then go on.
+		pbc_hold(pbc_wait_seconds(d[12]));
+		return;
+	}
+
+	// Menu: a moving menu picture is played again "loop" times (0 = always);
+	// then it stays on screen until a choice or the timeout.
+	if (plm && cur_duration >= 1.0 && pbc.loops != 1)
+	{
+		if (pbc.loops > 1) pbc.loops--;
+		seek_to(0, FALSE);
+		return;
+	}
+	pbc_hold(pbc_wait_seconds(d[16]));
+}
+
+static void pbc_wait_done(player_t *p)
+{
+	const uint8_t *d = pbc.list;
+	pbc.wait_until = 0;
+	if (!d) return;
+	pbc.jumps = 0;
+	if (d[0] == 0x10) pbc_goto(p, be16(d + 6));                    // next
+	else if (be16(d + 14) != PSD_OFS_DISABLED) pbc_goto(p, be16(d + 14)); // timeout
+}
+
+static void pbc_start(player_t *p)
+{
+	memset(&pbc, 0, sizeof(pbc));
+	pbc.active = 1;
+	pbc_goto(p, pbc_first);
+}
+
+// Menu keys. Returns 1 when the key was used.
+static int pbc_key(player_t *p, int code)
+{
+	if (!pbc.active || !pbc.list) return 0;
+	const uint8_t *d = pbc.list;
+	int ofs = PSD_OFS_DISABLED;
+	pbc.jumps = 0;
+
+	if (pbc_is_menu())
+	{
+		int nos = d[2], bsn = d[3];
+		switch (code)
+		{
+		case KEY_UP:
+			if (nos) pbc.sel = bsn + (pbc.sel - bsn + nos - 1) % nos;
+			return 1;
+		case KEY_DOWN:
+			if (nos) pbc.sel = bsn + (pbc.sel - bsn + 1) % nos;
+			return 1;
+		case KEY_ENTER:
+			if (pbc.sel - bsn < nos && 20 + 2 * (pbc.sel - bsn) + 2 <= psd_size - (d - psd)) ofs = be16(d + 20 + 2 * (pbc.sel - bsn));
+			break;
+		case KEY_PLAY:
+			ofs = be16(d + 12); // default
+			if (ofs == PSD_OFS_MULTI_DEF || ofs == PSD_OFS_MULTI_DEF_NO_NUM) ofs = be16(d + 20);
+			break;
+		case KEY_RIGHT: ofs = be16(d + 8); break;  // next
+		case KEY_LEFT:  ofs = be16(d + 6); break;  // previous
+		case KEY_SPACE: ofs = be16(d + 10); break; // return
+		case KEY_PAGEUP:
+		case KEY_PAGEDOWN:
+			return 1; // no fast forward / rewind in menus
+		default:
+			return 0;
+		}
+	}
+	else if (d[0] == 0x10)
+	{
+		switch (code)
+		{
+		case KEY_SPACE: ofs = be16(d + 8); break; // return (usually the menu)
+		case KEY_PLAY:
+			if (!pbc.holding) return 0;
+			ofs = be16(d + 6); // waiting at the end of the list: go on
+			break;
+		case KEY_RIGHT:
+			if (!pbc.holding) return 0; // chapters while playing
+			ofs = be16(d + 6);
+			break;
+		case KEY_LEFT:
+			if (!pbc.holding) return 0;
+			ofs = be16(d + 4);
+			break;
+		default:
+			return 0;
+		}
+	}
+	else return 0;
+
+	if (ofs != PSD_OFS_DISABLED && psd_list(ofs)) pbc_goto(p, ofs);
+	return 1;
+}
+
+static void pbc_stop(void)
+{
+	pbc.active = 0;
+	pbc.list = NULL;
+	pbc.holding = 0;
+}
+
+static void pbc_end(player_t *p)
+{
+	pbc.active = 0;
+	pbc.list = NULL;
+	do_stop(p);
+	printf("vcd_player: end of the Video CD menus\n");
 }
 
 static void handle_key(player_t *p, int code, double now)
@@ -1209,8 +1598,22 @@ static void handle_key(player_t *p, int code, double now)
 		return;
 	}
 
+	if (pbc_key(p, code))
+	{
+		fprintf(stderr, "vcd_player: key %d, menu choice %d\n", code, pbc.sel);
+		return;
+	}
+
 	switch (code)
 	{
+	case KEY_UP:
+		audio_mode = (audio_mode + 2) % 3;
+		break;
+
+	case KEY_DOWN:
+		audio_mode = (audio_mode + 1) % 3;
+		break;
+
 	case KEY_PLAY:
 	case KEY_PLAYCD:
 		do_play(p);
@@ -1278,7 +1681,9 @@ static void scan_step(player_t *p, double elapsed)
 		p->ff_time += step;
 		if (p->ff_time >= cur_duration - 1.0)
 		{
-			int t = next_data_track(cur_track, 1);
+			// With disc menus the scan stays inside the current item; the
+			// menu decides what comes next.
+			int t = pbc.active ? 0 : next_data_track(cur_track, 1);
 			if (!t || open_track(t))
 			{
 				// End of the disc: play out the last second normally.
@@ -1295,7 +1700,7 @@ static void scan_step(player_t *p, double elapsed)
 		p->ff_time -= step;
 		if (p->ff_time <= 0)
 		{
-			int t = next_data_track(cur_track, -1);
+			int t = pbc.active ? 0 : next_data_track(cur_track, -1);
 			if (t && !open_track(t)) p->ff_time = cur_duration - 1.0;
 			else
 			{
@@ -1322,9 +1727,18 @@ static void osd_fill(const player_t *p, osd_info_t *info)
 		info->duration = cur_duration;
 		// Half a second of margin: a chapter jump lands on the frame just
 		// before the entry point.
-		info->chapter = chapter_at(time_to_lba(info->time) + 38) + 1;
+		if (cur_track) info->chapter = chapter_at(time_to_lba(info->time) + 38) + 1;
 	}
-	info->chapters = num_entries;
+	info->chapters = cur_track ? num_entries : 0;
+	info->audio_mode = audio_mode;
+	info->has_menu = pbc.active;
+	if (pbc_is_menu())
+	{
+		info->menu = 1;
+		info->sel = pbc.sel;
+		info->sel_min = pbc.list[3];
+		info->sel_max = pbc.list[3] + pbc.list[2] - 1;
+	}
 }
 
 static int play_disc(void)
@@ -1332,8 +1746,16 @@ static int play_disc(void)
 	player_t p;
 	memset(&p, 0, sizeof(p));
 
-	if (open_track(first_track())) return -1;
-	p.state = ST_PLAY;
+	if (pbc_ok)
+	{
+		pbc_start(&p);
+		if (p.state == ST_STOP) pbc_ok = 0; // menus unusable: plain playback
+	}
+	if (!pbc_ok)
+	{
+		if (open_track(first_track())) return -1;
+		p.state = ST_PLAY;
+	}
 
 	STAGE("decode");
 	int first = 1;
@@ -1350,14 +1772,22 @@ static int play_disc(void)
 		for (int key; (key = input_key(t));) handle_key(&p, key, t);
 		if (quit_requested) break;
 
-		if (p.state == ST_PLAY && plm)
+		if (p.state == ST_PLAY && plm && !(pbc.active && pbc.holding))
 		{
 			plm_decode(plm, elapsed);
 			if (plm_has_ended(plm))
 			{
-				int next = next_data_track(cur_track, 1);
-				if (!next || open_track(next)) break; // end of the disc
+				if (pbc.active) pbc_item_done(&p);
+				else
+				{
+					int next = next_data_track(cur_track, 1);
+					if (!next || open_track(next)) break; // end of the disc
+				}
 			}
+		}
+		else if (p.state == ST_PLAY && pbc.active && !plm && !pbc.holding)
+		{
+			pbc_item_done(&p);
 		}
 		else if ((p.state == ST_FF || p.state == ST_REW) && plm)
 		{
@@ -1367,8 +1797,10 @@ static int play_disc(void)
 		// Controls: shown after any button, hidden 10 s after the last one
 		// (an unanswered exit question is cancelled then). They stay up while
 		// stopped.
+		if (pbc.active && pbc.holding && pbc.wait_until > 0 && t >= pbc.wait_until) pbc_wait_done(&p);
+
 		if (p.confirm_exit && t >= p.osd_until) p.confirm_exit = 0;
-		int show = p.state == ST_STOP || t < p.osd_until;
+		int show = p.state == ST_STOP || t < p.osd_until || pbc_is_menu();
 		if (show && (p.dirty || t - osd_built >= 0.25))
 		{
 			osd_info_t info;
@@ -1448,6 +1880,7 @@ int main(int argc, char *argv[])
 	}
 	printf("vcd_player: %s, %d MPEG track(s)\n", kind, track_last - 1);
 	read_entries();
+	read_pbc();
 
 	STAGE("open framebuffer");
 	if (fb_open())
