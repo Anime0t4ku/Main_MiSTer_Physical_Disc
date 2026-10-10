@@ -509,6 +509,18 @@ static int play_track(int track)
 	printf("vcd_player: track %d, %dx%d @ %.3f fps, audio %d Hz\n", track,
 		plm_get_width(plm), plm_get_height(plm), plm_get_framerate(plm), plm_get_samplerate(plm));
 
+	// Video CD sectors carry one system header per stream type, so the first
+	// header usually announces only the video stream and pl_mpeg would never
+	// create the audio decoder. Every Video CD has exactly one MPEG-1 video
+	// stream (0xE0) and one MPEG-1 Layer II audio stream (0xC0): declare both
+	// and let pl_mpeg rebuild its decoders, as plm_probe() would.
+	plm->demux->num_video_streams = 1;
+	plm->demux->num_audio_streams = 1;
+	plm->has_decoders = FALSE;
+	plm->video_packet_type = 0;
+	plm->audio_packet_type = 0;
+	plm_init_decoders(plm);
+
 	STAGE("open audio");
 	plm_set_video_decode_callback(plm, on_video, NULL);
 	if (plm_get_num_audio_streams(plm) > 0 && (audio_pipe || !audio_open(plm_get_samplerate(plm) > 0 ? plm_get_samplerate(plm) : 44100)))
