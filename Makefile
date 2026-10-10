@@ -113,6 +113,9 @@ $(BUILDDIR)/main.cpp.o: $(filter-out $(BUILDDIR)/main.cpp.o, $(OBJ))
 
 # Video CD player: standalone HPS framebuffer application (tools/vcd_player).
 # Built separately with `make vcd_player`; the MiSTer binary does not depend on it.
+# No auto-vectorization: GCC 10.2 (the CI toolchain) emits NEON stores that
+# post-increment their own address register in pl_mpeg's block copy
+# (vst1.64 {d22}, [r3], r3), which crashes on the first predicted frames.
 VCD_PLAYER = $(BUILDDIR)/vcd_player
 
 .PHONY: vcd_player
@@ -121,6 +124,6 @@ vcd_player: $(VCD_PLAYER)
 $(VCD_PLAYER): tools/vcd_player/vcd_player.c tools/vcd_player/pl_mpeg.h
 	@mkdir -p $(BUILDDIR)
 	$(Q)$(info $@)
-	$(Q)$(CC) -O3 -g -Wall -std=gnu99 -static -o $@ $< -lm -lpthread
+	$(Q)$(CC) -O2 -fno-tree-vectorize -g -Wall -std=gnu99 -static -o $@ $< -lm -lpthread
 	$(Q)cp $@ $@.elf
 	$(Q)$(STRIP) $@
