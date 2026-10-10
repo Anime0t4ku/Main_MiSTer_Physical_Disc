@@ -2572,6 +2572,15 @@ static void joy_digital(int jnum, uint32_t mask, uint32_t code, char press, int 
 			case JOY_R:
 				uinp_send_key(KEY_PAGEDOWN, press);
 				break;
+
+			// Start / Select, used by the Video CD player controls.
+			case JOY_L2:
+				uinp_send_key(KEY_PLAY, press);
+				break;
+
+			case JOY_R2:
+				uinp_send_key(KEY_PAUSE, press);
+				break;
 			}
 		}
 		else if(jnum)

@@ -211,7 +211,22 @@ To enable it, copy `vcd_player` (built with `make vcd_player`, or taken from the
 /media/fat/linux/vcd_player
 ```
 
-Then, with Auto Disc Detection enabled, insert a Video CD while the MiSTer menu is showing. Playback starts automatically and plays every MPEG track of the disc in order. Press the OSD/Menu button to stop and return to the menu.
+Then, with Auto Disc Detection enabled, insert a Video CD while the MiSTer menu is showing. Playback starts automatically and plays every MPEG track of the disc in order. At the end of the disc, or when the OSD/Menu button is pressed, the player closes and the menu returns.
+
+### Video CD controls
+
+Pressing any button of the gamepad shows the controls and a progress bar at the bottom of the screen. They disappear 10 seconds after the last button press. The buttons are those of the MiSTer menu mapping:
+
+| Button | Action |
+| --- | --- |
+| Start | Play (also resumes normal speed after fast forward / rewind) |
+| Select | Pause / resume |
+| B | Stop (back to the beginning of the disc; Start plays again) |
+| D-pad right / left | Next / previous chapter |
+| R / L | Fast forward / rewind at 10x (press again, or Start, to play) |
+| X, then A | Exit to the menu (any other button cancels) |
+
+Chapters are the entry points stored on the disc (`ENTRIES.VCD`), or the MPEG tracks when the disc has none. Video CD menus (PBC) are not supported.
 
 When `/media/fat/linux/vcd_player` is not present, nothing changes: Video CDs are handled exactly as before.
 
