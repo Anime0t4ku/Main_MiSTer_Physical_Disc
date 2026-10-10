@@ -44,6 +44,18 @@
 
 static volatile sig_atomic_t quit_requested = 0;
 
+// Last step reached, reported if the player crashes (see on_crash).
+static const char *volatile stage = "start";
+#define STAGE(name) do { stage = (name); fprintf(stderr, "vcd_player: %s\n", stage); } while (0)
+
+static void on_crash(int sig)
+{
+	char msg[160];
+	int n = snprintf(msg, sizeof(msg), "vcd_player: crashed (signal %d) during: %s\n", sig, stage);
+	if (n > 0 && write(2, msg, n) < 0) n = 0;
+	_exit(128 + sig);
+}
+
 static void on_signal(int sig)
 {
 	(void)sig;
@@ -273,6 +285,19 @@ static int fb_open(void)
 	fb_stride = fix.line_length;
 	fb_bgr = var.red.offset == 16; // byte order B,G,R,A in memory
 	fb_len = (size_t)fb_stride * fb_h;
+	fprintf(stderr, "vcd_player: fb %dx%d stride %d bpp %d smem %u red.offset %d\n",
+		fb_w, fb_h, fb_stride, var.bits_per_pixel, fix.smem_len, var.red.offset);
+	// Never touch memory beyond what the driver reports for the framebuffer.
+	if (fix.smem_len && fb_len > fix.smem_len)
+	{
+		fb_h = fix.smem_len / fb_stride;
+		fb_len = (size_t)fb_stride * fb_h;
+	}
+	if (!fb_w || !fb_h || fb_stride < fb_w * 4)
+	{
+		close(fd);
+		return -1;
+	}
 	fb_mem = (uint8_t *)mmap(NULL, fb_len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 	close(fd);
 	if (fb_mem == MAP_FAILED)
@@ -468,9 +493,13 @@ static int play_track(int track)
 
 	plm_buffer_t *buf = plm_buffer_create_with_capacity(512 * 1024);
 	plm_buffer_set_load_callback(buf, feed_load, &feed);
+	STAGE("create MPEG decoder");
 	plm_t *plm = plm_create_with_buffer(buf, 1);
 	if (!plm) return -1;
-	if (!plm_probe(plm, 4 * 1024 * 1024))
+	// plm_probe() is only safe on seekable buffers; this one is a streaming
+	// buffer fed from the drive, so wait for the stream headers instead.
+	STAGE("read MPEG headers");
+	if (!plm_has_headers(plm))
 	{
 		fprintf(stderr, "vcd_player: track %d has no MPEG-1 stream\n", track);
 		plm_destroy(plm);
@@ -480,8 +509,9 @@ static int play_track(int track)
 	printf("vcd_player: track %d, %dx%d @ %.3f fps, audio %d Hz\n", track,
 		plm_get_width(plm), plm_get_height(plm), plm_get_framerate(plm), plm_get_samplerate(plm));
 
+	STAGE("open audio");
 	plm_set_video_decode_callback(plm, on_video, NULL);
-	if (plm_get_num_audio_streams(plm) > 0 && (audio_pipe || !audio_open(plm_get_samplerate(plm))))
+	if (plm_get_num_audio_streams(plm) > 0 && (audio_pipe || !audio_open(plm_get_samplerate(plm) > 0 ? plm_get_samplerate(plm) : 44100)))
 	{
 		plm_set_audio_decode_callback(plm, on_audio, NULL);
 		plm_set_audio_lead_time(plm, 0.1);
@@ -491,6 +521,7 @@ static int play_track(int track)
 		plm_set_audio_enabled(plm, 0);
 	}
 
+	STAGE("decode");
 	double last = now_seconds();
 	while (!quit_requested && !plm_has_ended(plm))
 	{
@@ -501,7 +532,14 @@ static int play_track(int track)
 
 		pending_frame = NULL;
 		plm_decode(plm, elapsed);
-		if (pending_frame) fb_draw(pending_frame);
+		if (pending_frame)
+		{
+			static int first = 1;
+			if (first) STAGE("draw first frame");
+			fb_draw(pending_frame);
+			if (first) STAGE("playing");
+			first = 0;
+		}
 
 		usleep(2000);
 	}
@@ -516,6 +554,12 @@ int main(int argc, char *argv[])
 	signal(SIGTERM, on_signal);
 	signal(SIGHUP, on_signal);
 	signal(SIGPIPE, SIG_IGN);
+	signal(SIGSEGV, on_crash);
+	signal(SIGBUS, on_crash);
+	signal(SIGILL, on_crash);
+	signal(SIGFPE, on_crash);
+	setvbuf(stdout, NULL, _IOLBF, 0);
+	STAGE("open drive");
 
 	cd_fd = open_drive(argc > 1 ? argv[1] : NULL);
 	if (cd_fd < 0)
@@ -524,12 +568,14 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
+	STAGE("read TOC");
 	if (read_toc())
 	{
 		fprintf(stderr, "vcd_player: could not read the disc table of contents\n");
 		return 1;
 	}
 
+	STAGE("detect Video CD");
 	const char *kind = detect_vcd_kind();
 	if (!kind)
 	{
@@ -543,6 +589,7 @@ int main(int argc, char *argv[])
 	}
 	printf("vcd_player: %s, %d MPEG track(s)\n", kind, track_last - 1);
 
+	STAGE("open framebuffer");
 	if (fb_open())
 	{
 		fprintf(stderr, "vcd_player: 32-bit /dev/fb0 not available\n");

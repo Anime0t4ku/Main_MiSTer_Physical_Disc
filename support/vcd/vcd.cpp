@@ -25,8 +25,8 @@ int vcd_disc_detect(void)
 int vcd_launch_player(const char *device)
 {
 	char command[256];
-	if (device && *device) snprintf(command, sizeof(command), "%s %s >/dev/null 2>&1", VCD_PLAYER_PATH, device);
-	else snprintf(command, sizeof(command), "%s >/dev/null 2>&1", VCD_PLAYER_PATH);
+	if (device && *device) snprintf(command, sizeof(command), "%s %s >/tmp/vcd_player.log 2>&1", VCD_PLAYER_PATH, device);
+	else snprintf(command, sizeof(command), "%s >/tmp/vcd_player.log 2>&1", VCD_PLAYER_PATH);
 
 	printf("DISC: Video CD detected, launching %s\n", VCD_PLAYER_PATH);
 	return menu_launch_graphical_script_command(command, "Video CD", VCD_PLAYER_PROCESS);
