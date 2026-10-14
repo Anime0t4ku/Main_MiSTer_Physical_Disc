@@ -16,10 +16,6 @@
 
 cdd_t cdd;
 
-// Physical disc: distance between the requested sector and the one whose subcode the drive returned
-#define PHYS_SUB_MAX_SHIFT 16
-static int phys_sub_shift = 0;
-
 // Subcode Q from raw P-W (bit 6 of each of the 96 bytes). Returns 1 when its CRC is valid.
 static int SubcodeQ(const uint8_t *sub, uint8_t *q)
 {
@@ -37,18 +33,6 @@ static int SubcodeQ(const uint8_t *sub, uint8_t *q)
 		for (int b = 0; b < 8; b++) crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021) : (uint16_t)(crc << 1);
 	}
 	return (uint16_t)~crc == (((uint16_t)q[10] << 8) | q[11]);
-}
-
-// LBA of the sector this subcode belongs to, from the absolute time in a valid mode 1 Q, or -1.
-static int SubcodeLBA(const uint8_t *sub)
-{
-	uint8_t q[12];
-	if (!SubcodeQ(sub, q) || (q[0] & 0x0F) != 1) return -1;
-
-	int m = (q[7] >> 4) * 10 + (q[7] & 0x0F);
-	int s = (q[8] >> 4) * 10 + (q[8] & 0x0F);
-	int f = (q[9] >> 4) * 10 + (q[9] & 0x0F);
-	return m * 60 * 75 + s * 75 + f - 150;
 }
 
 // MEGACD_SUBCODE_LOG=1 in MiSTer.ini: once per second of playback, write a summary of the
@@ -598,7 +582,6 @@ int cdd_t::Load(const char *filename)
 	fileTYPE *fd_img;
 
 	Unload();
-	phys_sub_shift = 0;
 
 	const char *ext = filename+strlen(filename)-4;
 	if (!strcmp(filename, PHYSICAL_DISC_SENTINEL))
@@ -692,7 +675,6 @@ int cdd_t::SwapPhys()
 {
 	toc_t nt = {};
 	if (physical_disc_current_toc(&nt) || !nt.last) return 0;   
-	phys_sub_shift = 0;
 	this->toc = nt;                                       
 	this->sectorSize = this->toc.tracks[0].sector_size ? this->toc.tracks[0].sector_size : 2352;
 	this->toc.tracks[this->toc.last].start = this->toc.end;   
@@ -1440,34 +1422,15 @@ int cdd_t::ReadSubcode(uint16_t* buf)
 	{
 		uint8_t rawsec[2352];
 
-		// The drive can return the subcode of a sector a few frames away, and the distance changes
-		// between reads: sent as is, some subcode would be repeated or skipped (broken CD+G graphics).
-		// The absolute time in Q tells which sector the subcode belongs to: read the one that matches.
-		int want = this->chd_audio_read_lba;
-		int at = want + phys_sub_shift;
-		err = -1;
-		for (int tries = 0; tries < 3; tries++)
+		if (!physical_disc_read_sector_sub(this->chd_audio_read_lba, rawsec, subc))
 		{
-			uint8_t cand[96];
-			if (!physical_disc_read_sector_sub(at, rawsec, cand)) break;   // keep the previous read, if any
-			memcpy(subc, cand, 96);
-			err = 0;
-
-			int sub_lba = SubcodeLBA(subc);
-			if (sub_lba < 0) break;              // no position in this Q: keep the current shift
-			if (sub_lba == want)
-			{
-				phys_sub_shift = at - want;
-				break;
-			}
-
-			int next = at + want - sub_lba;
-			if (next - want > PHYS_SUB_MAX_SHIFT || want - next > PHYS_SUB_MAX_SHIFT) break;
-			at = next;
+			err = -1;
 		}
-
-		//The drive returns raw P-W subchannel (READ CD sub-channel 001b), already in the layout the core expects, same as CHD RW_RAW
-		if (!err) memcpy(buf, subc, 96);
+		else
+		{
+			//The drive returns raw P-W subchannel (READ CD sub-channel 001b), already in the layout the core expects, same as CHD RW_RAW
+			memcpy(buf, subc, 96);
+		}
 	}
 	else if (this->toc.chd_f)
 	{
