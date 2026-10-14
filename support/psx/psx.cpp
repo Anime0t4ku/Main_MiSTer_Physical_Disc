@@ -939,6 +939,10 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 				if (region == region_t::UNKNOWN) region = game_info.region;
 				printf("Game ID: %s, region: %s\n", game_id, region_string(region));
 			}
+			// The core runs the BIOS of the region it got last: a disc of another region
+			// inserted with the tray needs a reset, or that BIOS stops in its menu.
+			int region_changed = s_hot_insert && region != region_t::UNKNOWN &&
+				s_swap_region != region_t::UNKNOWN && region != s_swap_region;
 			if (phys) s_swap_region = region;
 
 
@@ -988,8 +992,10 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 					}
 					// A disc inserted while the core runs (tray close) is handled like on a real
 					// PSX: the BIOS reads it (CD player shows the tracks) and the game boots
-					// only when the user leaves the shell, so the core is not reset.
-					reset = !noreset && !s_hot_insert;
+					// only when the user leaves the shell, so the core is not reset, unless
+					// the disc is from another region.
+					reset = !noreset && (!s_hot_insert || region_changed);
+					if (reset && s_hot_insert) printf("PSX: disc of another region, core reset\n");
 
 					strcpy(last_dir, name);
 					char *p = strrchr(last_dir, '/');
