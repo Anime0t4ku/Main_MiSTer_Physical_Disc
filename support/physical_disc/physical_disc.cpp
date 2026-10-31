@@ -1556,6 +1556,16 @@ void physical_disc_seek_hint(int lba)
 	}
 }
 
+int physical_disc_sector_ready(int lba)
+{
+	if (drv.dev_fd < 0 || drv.mid_swap || lba < 0 || lba >= drv.leadout_lba) return 1;
+
+	pthread_mutex_lock(&drv.ring_lock);
+	int ready = (entry_for(lba)->lba == lba);
+	pthread_mutex_unlock(&drv.ring_lock);
+	return ready;
+}
+
 static int fetch_sector(int lba, uint8_t *dst, uint8_t *sub96, int *sub_valid, int mark_active)
 {
 	if (sub_valid) *sub_valid = 0;

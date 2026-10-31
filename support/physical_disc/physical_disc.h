@@ -132,6 +132,11 @@ int physical_disc_read_subq_window(int lba, int count, uint8_t *raw96);
 void physical_disc_prewarm_blocking(void);
 void physical_disc_seek_hint(int lba);
 
+/* Non-blocking: 1 when lba is already in the read cache (or known unreadable),
+ * so a read of it returns at once without waiting for the drive.
+ */
+int physical_disc_sector_ready(int lba);
+
 
 typedef enum {
 	PHYSICAL_DISC_DISC_NONE = 0,
