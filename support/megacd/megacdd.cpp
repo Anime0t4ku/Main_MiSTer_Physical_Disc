@@ -759,7 +759,7 @@ void cdd_t::Reset() {
 // loop for that long, so the core stops getting status and the game crashes (issue #24).
 // Instead, wait here without sending: the background thread reads the sector, and the
 // core keeps getting status. After PHYS_WAIT_MAX_MS fall back to the blocking read.
-#define PHYS_WAIT_MAX_MS 10000
+#define PHYS_WAIT_MAX_MS 15000
 
 static int PhysWaitSector(int lba)
 {

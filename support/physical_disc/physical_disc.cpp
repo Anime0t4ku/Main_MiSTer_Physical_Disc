@@ -35,7 +35,8 @@
 #define SYNC_IO_BURST       8
 #define SYNC_IO_TIMEOUT_MS  3000
 #define AUDIO_SYNC_WAIT_MS  900
-#define BG_IO_TIMEOUT_MS    3000
+#define BG_IO_TIMEOUT_MS    10000
+#define SLOW_IO_LOG_MS      1000
 #define CAPPED_SPEED_NX     4
 #define IDLE_KEEPALIVE_MS   15000
 
@@ -238,9 +239,22 @@ static int scsi_read_cd(int lba, int count, uint8_t flags, int with_sub, uint8_t
 	io.mx_sb_len = sizeof(sense);
 	io.timeout = timeout_ms;
 
-	if (ioctl(drv.dev_fd, SG_IO, &io) < 0) return -1;
-	if (io.status || io.host_status || io.driver_status) return -2;
-	return 0;
+	double t0 = clock_ms();
+	int ret = 0;
+	if (ioctl(drv.dev_fd, SG_IO, &io) < 0) ret = -1;
+	else if (io.status || io.host_status || io.driver_status) ret = -2;
+
+	double dt = clock_ms() - t0;
+	if (ret || dt >= SLOW_IO_LOG_MS)
+	{
+		printf("DISC: read lba=%d count=%d sub=%d %s in %.0f ms (status %d host %d driver %d sense %X/%02X/%02X)\n",
+			lba, count, with_sub, ret ? "FAILED" : "ok", dt,
+			io.status, io.host_status, io.driver_status,
+			io.sb_len_wr > 2 ? (sense[2] & 0x0F) : 0,
+			io.sb_len_wr > 12 ? sense[12] : 0,
+			io.sb_len_wr > 13 ? sense[13] : 0);
+	}
+	return ret;
 }
 
 static int ioctl_read_raw(int lba, uint8_t *dst)
