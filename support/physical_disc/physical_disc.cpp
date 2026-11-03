@@ -36,6 +36,8 @@
 #define SYNC_IO_TIMEOUT_MS  3000
 #define AUDIO_SYNC_WAIT_MS  900
 #define BG_IO_TIMEOUT_MS    3000
+#define DATA_TAIL_PREGAP    150
+#define SLOW_IO_LOG_MS      1000
 #define CAPPED_SPEED_NX     4
 #define IDLE_KEEPALIVE_MS   15000
 
@@ -108,6 +110,22 @@ static int span_index(int lba)
 	for (int i = 0; i < drv.track_count; i++)
 		if (lba < drv.span[i].hi) return i;
 	return drv.track_count ? drv.track_count - 1 : -1;
+}
+
+/* End of the sectors worth prefetching in data track t. When a data track is followed by
+ * an audio track, the TOC puts the 2 s (150 sector) pregap of that audio track at the end
+ * of the data track. Those sectors are not data: some drives reject them at once, others
+ * (the SuperStation One dock) retry for seconds before failing, which freezes every read
+ * behind them (issue #24). Prefetch stops before them; an explicit request still reads them.
+ */
+static int data_prefetch_hi(int t)
+{
+	if (t < 0 || t >= drv.track_count) return 0;
+	int hi = drv.span[t].hi;
+	if (!drv.span[t].is_audio && t + 1 < drv.track_count && drv.span[t + 1].is_audio
+	    && hi - drv.span[t].lo > 2 * DATA_TAIL_PREGAP)
+		hi -= DATA_TAIL_PREGAP;
+	return hi;
 }
 
 static char preferred_dev[64] = "";
@@ -238,9 +256,22 @@ static int scsi_read_cd(int lba, int count, uint8_t flags, int with_sub, uint8_t
 	io.mx_sb_len = sizeof(sense);
 	io.timeout = timeout_ms;
 
-	if (ioctl(drv.dev_fd, SG_IO, &io) < 0) return -1;
-	if (io.status || io.host_status || io.driver_status) return -2;
-	return 0;
+	double t0 = clock_ms();
+	int ret = 0;
+	if (ioctl(drv.dev_fd, SG_IO, &io) < 0) ret = -1;
+	else if (io.status || io.host_status || io.driver_status) ret = -2;
+
+	double dt = clock_ms() - t0;
+	if (ret || dt >= SLOW_IO_LOG_MS)
+	{
+		printf("DISC: read lba=%d count=%d sub=%d %s in %.0f ms (status %d host %d driver %d sense %X/%02X/%02X)\n",
+			lba, count, with_sub, ret ? "FAILED" : "ok", dt,
+			io.status, io.host_status, io.driver_status,
+			io.sb_len_wr > 2 ? (sense[2] & 0x0F) : 0,
+			io.sb_len_wr > 12 ? sense[12] : 0,
+			io.sb_len_wr > 13 ? sense[13] : 0);
+	}
+	return ret;
 }
 
 static int ioctl_read_raw(int lba, uint8_t *dst)
@@ -273,6 +304,10 @@ static int refill_ring(int lba, int count, int sync)
 	int t = span_index(lba);
 	if (t >= 0 && lba + count > drv.span[t].hi) count = drv.span[t].hi - lba;
 	int audio = (t >= 0 && drv.span[t].is_audio);
+	if (t >= 0 && !audio) {
+		int safe = data_prefetch_hi(t);
+		if (lba < safe && lba + count > safe) count = safe - lba;
+	}
 	if (sync && audio && count > AUDIO_SYNC_BURST) count = AUDIO_SYNC_BURST;
 	uint8_t flags = audio ? 0x10 : 0xF8;
 	int timeout_ms = sync && audio ? AUDIO_SYNC_WAIT_MS : (sync ? SYNC_IO_TIMEOUT_MS : BG_IO_TIMEOUT_MS);
@@ -579,6 +614,7 @@ static void *ring_worker_main(void *arg)
 				int lba = pos + i;
 				if (lba >= drv.leadout_lba) break;
 				if (lane_of(lba) != w) break;
+				if (!w && lba >= data_prefetch_hi(span_index(lba))) break;
 				if (entry_for(lba)->lba != lba) { target = lba; break; }
 			}
 		}
@@ -1444,6 +1480,7 @@ int physical_disc_load_toc(toc_t *toc)
 		}
 		int pw_end = toc->tracks[0].start + WARMUP_SECTORS;
 		if (pw_end > drv.span[0].hi) pw_end = drv.span[0].hi;
+		if (!drv.span[0].is_audio && pw_end > data_prefetch_hi(0)) pw_end = data_prefetch_hi(0);
 		if (pw_end > drv.leadout_lba) pw_end = drv.leadout_lba;
 
 		int w = lane_of(toc->tracks[0].start);
@@ -1554,6 +1591,16 @@ void physical_disc_seek_hint(int lba)
 			drv.neighbor_end = end;
 		}
 	}
+}
+
+int physical_disc_sector_ready(int lba)
+{
+	if (drv.dev_fd < 0 || drv.mid_swap || lba < 0 || lba >= drv.leadout_lba) return 1;
+
+	pthread_mutex_lock(&drv.ring_lock);
+	int ready = (entry_for(lba)->lba == lba);
+	pthread_mutex_unlock(&drv.ring_lock);
+	return ready;
 }
 
 static int fetch_sector(int lba, uint8_t *dst, uint8_t *sub96, int *sub_valid, int mark_active)

@@ -11,6 +11,7 @@
 
 #include "megacd.h"
 #include "../../cfg.h"
+#include "../../hardware.h"
 #include "../chd/mister_chd.h"
 #include "../physical_disc/physical_disc.h"
 
@@ -753,6 +754,48 @@ void cdd_t::Reset() {
 	stat[9] = 0xF;
 }
 
+// A slow drive (some slim/slot drives) can take seconds to seek from the outer audio
+// tracks back to the data track. Reading the sector synchronously would freeze the main
+// loop for that long, so the core stops getting status and the game crashes (issue #24).
+// Instead, wait here without sending: the background thread reads the sector, and the
+// core keeps getting status. After PHYS_WAIT_MAX_MS fall back to the blocking read.
+#define PHYS_WAIT_MAX_MS 15000
+
+static int PhysWaitSector(int lba)
+{
+	static int wait_lba = -1;
+	static unsigned long wait_until = 0;
+	static unsigned long wait_start = 0;
+
+	if (physical_disc_sector_ready(lba))
+	{
+		if (wait_lba == lba)
+		{
+			printf("DISC: drive ready for lba=%d after %lu ms\n", lba, GetTimer(0) - wait_start);
+			wait_lba = -1;
+		}
+		return 0;
+	}
+
+	if (wait_lba != lba)
+	{
+		wait_lba = lba;
+		wait_start = GetTimer(0);
+		wait_until = GetTimer(PHYS_WAIT_MAX_MS);
+		physical_disc_seek_hint(lba);
+		return 1;
+	}
+
+	if (CheckTimer(wait_until))
+	{
+		printf("DISC: drive still busy for lba=%d after %d ms, reading synchronously\n", lba, PHYS_WAIT_MAX_MS);
+		wait_lba = -1;
+		return 0;
+	}
+
+	return 1;
+}
+
 void cdd_t::Update() {
 	if (this->status == CD_STAT_STOP || this->status == CD_STAT_TRAY || this->status == CD_STAT_OPEN)
 	{
@@ -794,6 +837,12 @@ void cdd_t::Update() {
 		if (CanSendData && !CanSendData(this->toc.tracks[this->index].type))
 		{
 			// Not ready yet to receive sector
+			return;
+		}
+
+		if (this->toc.phys && this->toc.tracks[this->index].type && PhysWaitSector(this->lba))
+		{
+			// Physical drive still seeking: keep answering the core instead of blocking
 			return;
 		}
 
