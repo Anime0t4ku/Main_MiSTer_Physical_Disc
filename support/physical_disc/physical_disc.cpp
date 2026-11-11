@@ -972,6 +972,32 @@ static int subq_crc_valid(const uint8_t *q)
 	return subq_crc16(q) == expected;
 }
 
+/* Decode the position Q frame (ADR 1) of one sector's raw P-W subchannel.
+ * Returns 0 and the BCD-decoded track and index when the CRC is good and the
+ * absolute address is within one sector of lba, -1 otherwise.
+ */
+int physical_disc_subq_position(const uint8_t *raw96, int lba, int *track, int *index)
+{
+	uint8_t q[12];
+	if (!raw96) return -1;
+	raw_subq_decode(raw96, q);
+	if (!subq_crc_valid(q) || (q[0] & 0x0F) != 1) return -1;
+
+	int am = bcd_value(q[7]);
+	int as = bcd_value(q[8]);
+	int af = bcd_value(q[9]);
+	if (am < 0 || as < 0 || af < 0 || as >= 60 || af >= 75) return -1;
+	int q_lba = (am * 60 + as) * 75 + af - 150;
+	if (q_lba < lba - 1 || q_lba > lba + 1) return -1;
+
+	int t = bcd_value(q[1]);
+	int i = bcd_value(q[2]);
+	if (t < 0 || i < 0) return -1;
+	if (track) *track = t;
+	if (index) *index = i;
+	return 0;
+}
+
 /*
  * Probe one physical LBA for trustworthy ADR=1 position Q.  For INDEX 00,
  * the relative MSF is a countdown to INDEX 01, so it must agree with the

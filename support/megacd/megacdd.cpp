@@ -796,6 +796,29 @@ static int PhysWaitSector(int lba)
 	return 1;
 }
 
+// The drive TOC only gives each track's INDEX 01, so on a physical disc an audio
+// track runs on through the next track's pregap (INDEX 00). A CHD or CUE ends
+// the track at INDEX 00 instead, and games that stop when the drive reports the
+// next track (Snatcher, issue #26) rely on that. While playing the end of an
+// audio track, look at the Q subchannel of the sector about to be sent: once it
+// says "next track, INDEX 00", end the current track at this LBA. Costs nothing
+// at mount time; without subchannel support nothing changes.
+#define PHYS_PREGAP_LOOKAHEAD 750
+
+static int PhysAtNextPregap(const toc_t *toc, int index, int lba)
+{
+	if (!toc->phys || index + 1 >= toc->last) return 0;
+	if (toc->tracks[index].type != TT_CDDA || toc->tracks[index + 1].type != TT_CDDA) return 0;
+	if (lba <= toc->tracks[index].start || toc->tracks[index].end - lba > PHYS_PREGAP_LOOKAHEAD) return 0;
+	if (!physical_disc_sector_ready(lba)) return 0;
+
+	uint8_t raw[2352], sub[96];
+	int track = 0, qindex = -1;
+	if (!physical_disc_read_sector_sub(lba, raw, sub)) return 0;
+	if (physical_disc_subq_position(sub, lba, &track, &qindex)) return 0;
+	return track == index + 2 && qindex == 0;
+}
+
 void cdd_t::Update() {
 	if (this->status == CD_STAT_STOP || this->status == CD_STAT_TRAY || this->status == CD_STAT_OPEN)
 	{
@@ -861,6 +884,15 @@ void cdd_t::Update() {
 		}
 		else
 		{
+			if (PhysAtNextPregap(&this->toc, this->index, this->lba))
+			{
+				printf("DISC: track %d ends at INDEX 00 of track %d, lba=%d (TOC said %d)\n",
+					this->index + 1, this->index + 2, this->lba, this->toc.tracks[this->index].end);
+				this->toc.tracks[this->index].end = this->lba;
+				this->index++;
+				this->isData = 0x01;
+			}
+
 			if (this->lba >= this->toc.tracks[this->index].start)
 			{
 				this->isData = 0x00;
