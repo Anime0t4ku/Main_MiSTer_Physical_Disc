@@ -769,7 +769,7 @@ static int PhysWaitSector(int lba)
 
 	if (physical_disc_sector_ready(lba))
 	{
-		if (wait_lba == lba)
+		if (wait_lba >= 0 && wait_lba == lba)
 		{
 			printf("DISC: drive ready for lba=%d after %lu ms\n", lba, GetTimer(0) - wait_start);
 			wait_lba = -1;
@@ -1435,6 +1435,10 @@ int cdd_t::ReadCDDA(uint8_t *buf)
 
 	if (this->isData)
 	{
+		// Muted (pregap, pause, data): send silence. buf is not initialised by the
+		// caller, so returning without writing it played leftover stack bytes as a
+		// short buzz, heard on physical discs when a track ends at INDEX 00 (#26).
+		memset(buf, 0, this->audioLength);
 		return this->audioLength;
 	}
 
