@@ -100,6 +100,7 @@ int physical_disc_load_toc(toc_t *toc);
 int physical_disc_current_toc(toc_t *toc);
 int physical_disc_toc_audio_only(const toc_t *toc);
 int physical_disc_psx_enrich_toc(toc_t *toc);
+int physical_disc_subq_position(const uint8_t *raw96, int lba, int *track, int *index);
 
 
 
